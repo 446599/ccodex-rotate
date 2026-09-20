@@ -108,6 +108,17 @@ func fetchOnce(ctx context.Context, rawURL string, proxy *url.URL) ([]byte, erro
 	return body, nil
 }
 
+// ResolveProxy returns a single preferred outbound proxy URL, or nil for direct.
+func ResolveProxy(explicit string) (*url.URL, error) {
+	chain := proxyChain(explicit)
+	for _, u := range chain {
+		if u != nil {
+			return u, nil
+		}
+	}
+	return nil, nil
+}
+
 // Fetch downloads a subscription, trying every usable proxy in turn.
 func Fetch(ctx context.Context, rawURL, explicitProxy string) ([]byte, error) {
 	chain := proxyChain(explicitProxy)

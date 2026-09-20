@@ -83,7 +83,8 @@ func FindBinary(cfg config.Config) (string, error) {
 			return cfg.MihomoPath, nil
 		}
 	}
-	candidates := []string{
+	var candidates []string
+	candidates = append(candidates,
 		// macOS
 		"/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo",
 		"/Applications/ClashX Meta.app/Contents/Resources/mihomo",
@@ -91,34 +92,75 @@ func FindBinary(cfg config.Config) (string, error) {
 		"/opt/homebrew/bin/mihomo",
 		"/usr/local/bin/mihomo",
 		"/opt/homebrew/bin/clash-meta",
-		// Windows
-		`C:\Program Files\Clash Verge\verge-mihomo.exe`,
-		`C:\Program Files\Clash Verge\mihomo.exe`,
-		`C:\Program Files\Clash Verge\clash-meta.exe`,
-		`C:\Program Files (x86)\Clash Verge\verge-mihomo.exe`,
-		`C:\Program Files\Mihomo Party\resources\sidecar\mihomo.exe`,
-	}
-	// Also look next to this executable (portable install).
+	)
+	candidates = append(candidates, windowsCandidates()...)
+
+	// Next to this executable and in the data dir (fetch-core writes here).
 	if exe, err := os.Executable(); err == nil {
 		dir := filepath.Dir(exe)
 		candidates = append(candidates,
-			filepath.Join(dir, "mihomo"),
-			filepath.Join(dir, "mihomo.exe"),
-			filepath.Join(dir, "verge-mihomo"),
-			filepath.Join(dir, "verge-mihomo.exe"),
+			filepath.Join(dir, "mihomo"), filepath.Join(dir, "mihomo.exe"),
+			filepath.Join(dir, "verge-mihomo"), filepath.Join(dir, "verge-mihomo.exe"),
 		)
 	}
+	home, _ := os.UserHomeDir()
+	dataDir := config.DataDir()
+	for _, d := range []string{
+		filepath.Join(dataDir, "mihomo"),
+		filepath.Join(home, ".ccodex-rotate", "mihomo"),
+	} {
+		candidates = append(candidates,
+			filepath.Join(d, "mihomo"), filepath.Join(d, "mihomo.exe"),
+			filepath.Join(d, "verge-mihomo"), filepath.Join(d, "verge-mihomo.exe"),
+			filepath.Join(d, "clash-meta"), filepath.Join(d, "clash-meta.exe"),
+		)
+	}
+
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			return c, nil
 		}
 	}
-	for _, name := range []string{"mihomo", "mihomo.exe", "clash-meta", "clash-meta.exe", "clash", "clash.exe"} {
+	for _, name := range []string{"mihomo", "mihomo.exe", "clash-meta", "clash-meta.exe", "clash", "clash.exe", "verge-mihomo", "verge-mihomo.exe"} {
 		if p, err := exec.LookPath(name); err == nil {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("mihomo binary not found; set mihomo_path in config (see `ccodex-rotate check`)")
+	return "", fmt.Errorf("mihomo binary not found; run `ccodex-rotate fetch-core` to download it, or set mihomo_path in config")
+}
+
+// windowsCandidates returns common Windows core locations from the environment.
+func windowsCandidates() []string {
+	var dirs []string
+	addDir := func(root, name string) {
+		if root == "" {
+			return
+		}
+		base := filepath.Join(root, name)
+		dirs = append(dirs, base, filepath.Join(base, "resources"), filepath.Join(base, "resources", "sidecar"))
+	}
+	for _, root := range []string{os.Getenv("LOCALAPPDATA"), os.Getenv("PROGRAMFILES"), os.Getenv("ProgramFiles(x86)")} {
+		addDir(root, filepath.Join("Programs", "Clash Verge"))
+		addDir(root, "Clash Verge")
+		addDir(root, filepath.Join("Programs", "Mihomo Party"))
+		addDir(root, "Mihomo Party")
+		addDir(root, "Clash Verge Rev")
+	}
+	for _, sub := range []string{
+		filepath.Join("scoop", "apps", "mihomo", "current"),
+		filepath.Join("scoop", "apps", "clash-meta", "current"),
+	} {
+		if home := os.Getenv("USERPROFILE"); home != "" {
+			dirs = append(dirs, filepath.Join(home, sub))
+		}
+	}
+	var out []string
+	for _, d := range dirs {
+		for _, exe := range []string{"verge-mihomo.exe", "mihomo.exe", "clash-meta.exe", "clash.exe"} {
+			out = append(out, filepath.Join(d, exe))
+		}
+	}
+	return out
 }
 
 // Start writes the config and launches mihomo, then waits for the controller.

@@ -21,6 +21,7 @@ import (
 
 	"ccodex-rotate/internal/codexcfg"
 	"ccodex-rotate/internal/config"
+	"ccodex-rotate/internal/core"
 	"ccodex-rotate/internal/mihomo"
 	"ccodex-rotate/internal/nodes"
 	"ccodex-rotate/internal/proxy"
@@ -51,6 +52,10 @@ func main() {
 		runProxy(*cfgPath, fs.Args())
 	case "node":
 		runNode(*cfgPath, fs.Args())
+	case "core":
+		runCore(*cfgPath, fs.Args())
+	case "fetch-core":
+		runFetchCore(*cfgPath)
 	case "serve", "run":
 		runServe(*cfgPath, *codexHome)
 	case "check":
@@ -86,6 +91,8 @@ func usage() {
   ccodex-rotate proxy add <uri...>   add an explicit proxy (http/https/socks5)
   ccodex-rotate proxy list           list explicit proxies
   ccodex-rotate proxy clear          remove all explicit proxies
+  ccodex-rotate fetch-core        download a mihomo core for this platform
+  ccodex-rotate core [path]       show detected core, or set mihomo_path
   ccodex-rotate serve      start mihomo + local proxy + panel (Ctrl+C to stop)
   ccodex-rotate check      validate config and generated mihomo config
   ccodex-rotate status     read live status from a running instance
@@ -235,6 +242,44 @@ func redactNode(u string) string {
 		return u[:i+16] + "…"
 	}
 	return u
+}
+
+func runCore(cfgPath string, args []string) {
+	cfg, err := config.Load(cfgPath)
+	fatal(err)
+	if len(args) >= 1 {
+		cfg.MihomoPath = strings.TrimSpace(args[0])
+		if err := config.Save(cfgPath, cfg); err != nil {
+			fatal(err)
+		}
+		log.Printf("mihomo_path set to %s", cfg.MihomoPath)
+		return
+	}
+	if cfg.MihomoPath != "" {
+		log.Printf("configured mihomo_path: %s", cfg.MihomoPath)
+	}
+	if p, err := mihomo.FindBinary(cfg); err == nil {
+		log.Printf("detected mihomo: %s", p)
+	} else {
+		log.Printf("not found; run `ccodex-rotate fetch-core` or `ccodex-rotate core <path>`")
+	}
+}
+
+func runFetchCore(cfgPath string) {
+	cfg, err := config.Load(cfgPath)
+	fatal(err)
+	dir := filepath.Join(config.DataDir(), "mihomo")
+	log.Printf("downloading mihomo for this platform ...")
+	path, err := core.Fetch(context.Background(), cfg.DownloadProxy, dir)
+	if err != nil {
+		fatal(fmt.Errorf("%w (or set mihomo_path manually: `ccodex-rotate core <path>`)", err))
+	}
+	cfg.MihomoPath = path
+	if err := config.Save(cfgPath, cfg); err != nil {
+		fatal(err)
+	}
+	log.Printf("mihomo downloaded: %s", path)
+	log.Printf("mihomo_path saved; run `ccodex-rotate serve`")
 }
 
 func contains(list []string, v string) bool {

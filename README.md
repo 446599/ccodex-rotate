@@ -34,10 +34,22 @@
 
 ### 前置条件
 
-需要一个可用的 **mihomo / Clash.Meta 内核**（本工具不内置）。常见来源：
+需要一个可用的 **mihomo / Clash.Meta 内核**（本工具不内置）。三种方式任选：
 
-- 已安装 Clash Verge / Mihomo Party（会自动探测其内核路径）
-- 或自行下载 mihomo，在配置里用 `mihomo_path` 指定
+1. 已安装 Clash Verge / Mihomo Party 等，工具会自动探测其内核路径；
+2. 自动下载内核：
+
+   ```sh
+   ccodex-rotate fetch-core     # macOS/Linux
+   ccodex-rotate.exe fetch-core # Windows
+   ```
+
+3. 已有内核，手动指定：
+
+   ```sh
+   ccodex-rotate core "/path/to/mihomo"        # macOS/Linux
+   ccodex-rotate.exe core "C:\path\to\mihomo.exe"  # Windows
+   ```
 
 ---
 
