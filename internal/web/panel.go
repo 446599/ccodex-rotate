@@ -39,6 +39,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/rotate", p.rotate)
 	mux.HandleFunc("/api/collect", p.collect)
 	mux.HandleFunc("/api/scan", p.collect)
+	mux.HandleFunc("/api/injection", p.injection)
 	mux.HandleFunc("/api/sources/add", p.sourcesAdd)
 	mux.HandleFunc("/api/sources/clear", p.sourcesClear)
 	mux.HandleFunc("/api/pin", p.pin)
@@ -61,6 +62,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 	node, _ := p.Mgr.Current(ctx)
 	ok, reachable, unknown, failed, total := p.Eg.Counts()
 	lastCollect, lastCollectOK, nextCollect, collecting := p.Eg.CollectInfo()
+	ctried, ctotal := p.Eg.CollectProgress()
 	reqs, errs, recent := p.Proxy.Stats()
 	m := map[string]any{
 		"listen":           p.Listen,
@@ -74,6 +76,9 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"failed":           failed,
 		"total":            total,
 		"collecting":       collecting,
+		"collect_tried":    ctried,
+		"collect_total":    ctotal,
+		"inject":           p.Proxy.InjectionEnabled(),
 		"auth_ready":       p.Proxy.HasAuth(),
 		"last_collect":     lastCollect,
 		"last_collect_ok":  lastCollectOK,
@@ -137,6 +142,18 @@ func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
 		go p.Eg.Collect(context.Background())
 	}
 	writeJSON(w, map[string]any{"started": true})
+}
+
+func (p *Panel) injection(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	p.Proxy.SetInjection(body.Enabled)
+	writeJSON(w, map[string]any{"injection": body.Enabled})
 }
 
 func (p *Panel) sourcesAdd(w http.ResponseWriter, r *http.Request) {
@@ -259,7 +276,14 @@ code{background:#8882;padding:1px 5px;border-radius:5px}
   <div class="row"><span>节点质量（可用292 / 可达 / 未测 / 失败 / 总）</span><span id="counts2" class="muted">…</span></div>
   <div class="row"><span>请求 / 错误</span><span id="counts" class="muted">…</span></div>
   <div class="row"><span>上次采集</span><span id="scan" class="muted">…</span></div>
+  <div id="progWrap" style="display:none;margin:4px 0">
+    <div style="background:#8882;border-radius:6px;height:10px;overflow:hidden">
+      <div id="prog" style="background:#2ecc71;height:10px;width:0%"></div>
+    </div>
+    <div id="progText" class="muted" style="font-size:12px">…</div>
+  </div>
   <div class="row"><span>下次采集</span><span id="next" class="muted">…</span></div>
+  <div class="row"><span>注入凭据</span><button id="injBtn" onclick="toggleInject()">…</button></div>
   <div class="row"><span>目标长度 / 探测模型</span><span id="cfg" class="muted">…</span></div>
   <div class="row"><span>代理地址 / 上游</span><span class="muted"><code>{{.Listen}}</code> → <code>{{.Upstream}}</code></span></div>
   <div class="row" style="margin-top:10px">
@@ -313,6 +337,11 @@ async function clearSrc(kind){
   await fetch('/api/sources/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:kind})});
   document.getElementById('srcResult').textContent='已清空';refresh();
 }
+async function toggleInject(){
+  var on=!window._inj;
+  await fetch('/api/injection',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});
+  refresh();
+}
 async function use(name){await fetch('/api/pin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});refresh();}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function ts(v){if(!v||v.indexOf('0001')===0)return '—';return new Date(v).toLocaleString();}
@@ -331,6 +360,14 @@ async function refresh(){
     sc=ts(s.last_collect)+' · '+(s.last_collect_ok?'成功（已注入）':'未采到')+' '+ago(s.last_collect);
   document.getElementById('scan').textContent=sc;
   document.getElementById('next').textContent=s.collecting?'采集中…':ts(s.next_collect);
+  window._inj=!!s.inject;
+  var ib=document.getElementById('injBtn');
+  if(ib){ib.textContent=s.inject?'已开启（点击关闭）':'已关闭（点击开启）';ib.style.borderColor=s.inject?'#2ecc71':'#e74c3c';}
+  var pw=document.getElementById('progWrap');
+  if(pw){
+    if(s.collecting){pw.style.display='block';var tot=s.collect_total||0;var tr=s.collect_tried||0;var pct=tot?Math.floor(tr*100/tot):0;document.getElementById('prog').style.width=pct+'%';document.getElementById('progText').textContent='正在逐个节点探测 '+tr+' / '+tot+'（找到即停）';}
+    else{pw.style.display='none';}
+  }
   document.getElementById('cfg').textContent=(s.target_lengths||[]).join(',')+' 字符 · '+s.probe_model+' · 成功'+s.success_interval+'s/失败'+s.retry_interval+'s';
   if(document.getElementById('srcCounts')) document.getElementById('srcCounts').textContent='订阅 '+s.subs+' · 节点 '+s.nodes+' · 代理 '+s.proxies;
   var st=s.states||[];

@@ -26,6 +26,8 @@ type Egress struct {
 	lastCollect   time.Time
 	lastCollectOK bool
 	nextCollect   time.Time
+	collectTried  int
+	collectTotal  int
 	probe         ProbeFunc
 	manual        bool // forwarding exit manually pinned; collection ignores it
 }
@@ -268,6 +270,11 @@ func (e *Egress) Collect(ctx context.Context) bool {
 	}
 	names = e.preferOK(names)
 
+	e.mu.Lock()
+	e.collectTotal = len(names)
+	e.collectTried = 0
+	e.mu.Unlock()
+
 	timeout := time.Duration(e.m.cfg.ProbeTimeoutSec) * time.Second
 	if timeout <= 0 {
 		timeout = 12 * time.Second
@@ -289,6 +296,9 @@ func (e *Egress) Collect(ctx context.Context) bool {
 		}
 		length, reachable, _, err := probe(ctx, client)
 		tried++
+		e.mu.Lock()
+		e.collectTried = tried
+		e.mu.Unlock()
 		switch {
 		case err == nil && length > 0 && (len(targets) == 0 || targets[length]):
 			e.p.MarkOK(name, 0)
@@ -353,6 +363,14 @@ func (e *Egress) CollectInfo() (time.Time, bool, time.Time, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.lastCollect, e.lastCollectOK, e.nextCollect, e.collecting
+}
+
+// CollectProgress returns how many nodes have been tried out of the total in
+// the current collection round.
+func (e *Egress) CollectProgress() (int, int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.collectTried, e.collectTotal
 }
 
 // reachabilityProbe is the unauthenticated fallback probe.

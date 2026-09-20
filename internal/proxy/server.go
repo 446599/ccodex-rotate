@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ccodex-rotate/internal/config"
@@ -56,6 +57,7 @@ type Server struct {
 	state   *turnstate.Store
 	lengths map[int]bool
 	models  *modelid.Resolver
+	inject  atomic.Bool
 
 	reqCount int64
 	errCount int64
@@ -121,17 +123,23 @@ func New(cfg config.Config, eg Egress, logf func(string, ...any)) *Server {
 		logf = func(string, ...any) {}
 	}
 	s := &Server{cfg: cfg, eg: eg, logf: logf, recent: newRing(50), models: modelid.New(cfg.ModelAliases)}
-	if cfg.InjectState {
-		s.state = turnstate.New(time.Duration(cfg.StateTTLSeconds) * time.Second)
-		if len(cfg.StateLengths) > 0 {
-			s.lengths = map[int]bool{}
-			for _, n := range cfg.StateLengths {
-				s.lengths[n] = true
-			}
+	// The state store is always created so injection can be toggled at runtime.
+	s.state = turnstate.New(time.Duration(cfg.StateTTLSeconds) * time.Second)
+	if len(cfg.StateLengths) > 0 {
+		s.lengths = map[int]bool{}
+		for _, n := range cfg.StateLengths {
+			s.lengths[n] = true
 		}
 	}
+	s.inject.Store(cfg.InjectState)
 	return s
 }
+
+// SetInjection enables or disables credential injection at runtime.
+func (s *Server) SetInjection(on bool) { s.inject.Store(on) }
+
+// InjectionEnabled reports whether credential injection is on.
+func (s *Server) InjectionEnabled() bool { return s.inject.Load() }
 
 // StateSnapshot returns the cached turn-state entries for the panel.
 func (s *Server) StateSnapshot() []turnstate.Entry {
@@ -344,9 +352,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Host = "" // let net/http set from URL
 		req.ContentLength = int64(len(body))
 
-		// Inject a cached turn-state. Cross-node injection is allowed by
-		// default; enable inject_node_affinity to force the producing node.
-		if s.state != nil && model != "" {
+		// Inject a cached turn-state (can be toggled off at runtime).
+		if s.inject.Load() && s.state != nil && model != "" {
 			if e, ok := s.state.Get(account, model); ok && s.lengthAllowed(e.Length) {
 				inject := true
 				if s.cfg.InjectNodeAffinity && e.Node != "" && e.Node != s.eg.Current() {
