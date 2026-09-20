@@ -63,6 +63,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 	ok, reachable, unknown, failed, total := p.Eg.Counts()
 	lastCollect, lastCollectOK, nextCollect, collecting := p.Eg.CollectInfo()
 	ctried, ctotal := p.Eg.CollectProgress()
+	seenModel, seenLen := p.Eg.LastSeen()
 	reqs, errs, recent := p.Proxy.Stats()
 	m := map[string]any{
 		"listen":           p.Listen,
@@ -78,6 +79,8 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"collecting":       collecting,
 		"collect_tried":    ctried,
 		"collect_total":    ctotal,
+		"last_seen_model":  seenModel,
+		"last_seen_len":    seenLen,
 		"inject":           p.Proxy.InjectionEnabled(),
 		"auth_ready":       p.Proxy.HasAuth(),
 		"last_collect":     lastCollect,
@@ -372,9 +375,10 @@ async function refresh(){
   if(document.getElementById('srcCounts')) document.getElementById('srcCounts').textContent='订阅 '+s.subs+' · 节点 '+s.nodes+' · 代理 '+s.proxies;
   var st=s.states||[];
   var stMsg;
-  if(s.collecting) stMsg='正在采集…';
+  var obs = s.last_seen_len ? ('最近观测到 '+esc(s.last_seen_model||'')+' 返回 '+s.last_seen_len+' 字符（非目标）') : '';
+  if(s.collecting) stMsg='正在采集…'+(s.last_seen_len?('（已观测 '+s.last_seen_len+' 字符）'):'');
   else if(!s.auth_ready) stMsg='尚未获得账号凭据：在 Codex 里发一条消息后会自动开始采集';
-  else stMsg='尚无合格 292 凭据，正在按间隔重试';
+  else stMsg='尚无合格 292/332 凭据，正在按间隔重试'+(obs?('；'+obs):'');
   document.getElementById('states').innerHTML = st.length
     ? '<table><tr><th>模型</th><th>长度</th><th>来源节点</th><th>采集时间</th><th>已注入</th></tr>'+
       st.map(function(x){return '<tr><td>'+esc(x.model)+'</td><td><b>'+x.length+'</b> 字符</td><td>'+esc(x.node||'-')+'</td><td>'+ts(x.created)+' '+ago(x.created)+'</td><td>'+x.hits+'</td></tr>';}).join('')+'</table>'
@@ -386,10 +390,10 @@ async function refresh(){
   }).join('');
   document.getElementById('list').innerHTML='<table><tr><th>节点</th><th>类型</th><th>状态</th><th>延迟</th><th></th></tr>'+rows+'</table>';
   var rr=(s.recent||[]).map(function(x){
-    return '<tr><td>'+new Date(x.time).toLocaleTimeString()+'</td><td>'+esc(x.method)+'</td><td>'+esc(x.path)+'</td><td>'+x.status+'</td><td>'+esc(x.node)+'</td><td>'+x.attempts+'</td><td>'+x.millis+' ms</td></tr>';
+    return '<tr><td>'+new Date(x.time).toLocaleTimeString()+'</td><td>'+esc(x.method)+'</td><td>'+esc(x.path)+'</td><td>'+x.status+'</td><td>'+esc(x.node)+'</td><td>'+esc(x.model||'')+'</td><td>'+(x.injected?'是':'否')+'</td><td>'+x.attempts+'</td><td>'+x.millis+' ms</td></tr>';
   }).join('');
   document.getElementById('recent').innerHTML = rr
-    ? '<table><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>节点</th><th>尝试</th><th>耗时</th></tr>'+rr+'</table>'
+    ? '<table><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>节点</th><th>模型</th><th>注入</th><th>尝试</th><th>耗时</th></tr>'+rr+'</table>'
     : '—';
   if(s.mihomo_error){var el=document.getElementById('recent');el.innerHTML='<b style="color:#e74c3c">'+esc(s.mihomo_error)+'</b><br>'+el.innerHTML;}
  }catch(e){document.getElementById('list').textContent='读取失败：'+e;}

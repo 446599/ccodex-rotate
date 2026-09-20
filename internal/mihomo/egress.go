@@ -28,6 +28,8 @@ type Egress struct {
 	nextCollect   time.Time
 	collectTried  int
 	collectTotal  int
+	lastSeenLen   int
+	lastSeenModel string
 	probe         ProbeFunc
 	manual        bool // forwarding exit manually pinned; collection ignores it
 }
@@ -93,10 +95,17 @@ func NewEgress(m *Manager, statePath string) (*Egress, error) {
 		DisableKeepAlives:     true,
 		DisableCompression:    true,
 		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: headerTimeout(m.cfg.TimeoutSec),
 		ExpectContinueTimeout: time.Second,
 	}
 	return &Egress{m: m, tr: tr, p: pool.New(statePath)}, nil
+}
+
+func headerTimeout(sec int) time.Duration {
+	if sec <= 0 {
+		sec = 120
+	}
+	return time.Duration(sec) * time.Second
 }
 
 // Transport returns the shared transport.
@@ -263,12 +272,25 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		e.finishCollect(false)
 		return false
 	}
-	names, err := e.m.NodeNames(ctx)
-	if err != nil {
+	if _, err := e.m.NodeNames(ctx); err != nil {
 		e.finishCollect(false)
 		return false
 	}
-	names = e.preferOK(names)
+	// Candidates in pool order (ok > reachable > unknown), skipping nodes that
+	// are still cooling down after a recent failure so the round is not wasted
+	// on dead servers.
+	var candidates, cooling []string
+	for _, ent := range e.p.Snapshot() {
+		if ent.State == pool.Failed {
+			cooling = append(cooling, ent.Name)
+			continue
+		}
+		candidates = append(candidates, ent.Name)
+	}
+	if len(candidates) == 0 {
+		candidates = cooling
+	}
+	names := candidates
 
 	e.mu.Lock()
 	e.collectTotal = len(names)
@@ -298,6 +320,10 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		tried++
 		e.mu.Lock()
 		e.collectTried = tried
+		if length > 0 {
+			e.lastSeenLen = length
+			e.lastSeenModel = model
+		}
 		e.mu.Unlock()
 		switch {
 		case err == nil && length > 0 && (len(targets) == 0 || targets[length]):
@@ -371,6 +397,14 @@ func (e *Egress) CollectProgress() (int, int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.collectTried, e.collectTotal
+}
+
+// LastSeen returns the most recent turn-state length observed (even when it was
+// not an accepted length) and the model it was observed for.
+func (e *Egress) LastSeen() (string, int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastSeenModel, e.lastSeenLen
 }
 
 // reachabilityProbe is the unauthenticated fallback probe.

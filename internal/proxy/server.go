@@ -44,6 +44,8 @@ type Record struct {
 	Path     string    `json:"path"`
 	Status   int       `json:"status"`
 	Node     string    `json:"node"`
+	Model    string    `json:"model,omitempty"`
+	Injected bool      `json:"injected"`
 	Attempts int       `json:"attempts"`
 	Millis   int64     `json:"millis"`
 }
@@ -345,6 +347,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var lastErr error
 	attempts := 0
+	injectedAny := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		attempts = attempt + 1
 		req, err := http.NewRequestWithContext(ctx, r.Method, target, bytes.NewReader(body))
@@ -366,6 +369,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if inject {
 					req.Header.Set("X-Codex-Turn-State", e.Value)
 					s.state.Hit(account, model)
+					injectedAny = true
 				}
 			}
 		}
@@ -410,11 +414,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		resp.Body.Close()
 		s.record(Record{
 			Time: time.Now(), Method: r.Method, Path: r.URL.Path,
-			Status: resp.StatusCode, Node: s.eg.Current(), Attempts: attempts,
+			Status: resp.StatusCode, Node: s.eg.Current(), Model: model,
+			Injected: injectedAny, Attempts: attempts,
 			Millis: time.Since(start).Milliseconds(),
 		})
 		if copyErr != nil {
 			s.logf("stream %s: %v", r.URL.Path, copyErr)
+			// A mid-stream break is usually the exit dropping the connection;
+			// mark it so later requests avoid it (unless manually pinned, which
+			// Rotate respects).
+			if r.Context().Err() == nil {
+				if node, changed := s.eg.Rotate(ctx, "stream_error"); changed {
+					s.logf("egress switched after stream error: %s", node)
+				}
+			}
 		}
 		return
 	}
