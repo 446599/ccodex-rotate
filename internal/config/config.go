@@ -62,8 +62,7 @@ type Config struct {
 	// CollectOnStart collects once as soon as account auth is available.
 	CollectOnStart bool `json:"collect_on_start"`
 	// AutoCollect starts collection automatically when a target-model request
-	// arrives. When false, collection only runs on manual trigger
-	// (panel "立即采集" or `ccodex-rotate collect`).
+	// arrives (i.e. after you send a message). Default true.
 	AutoCollect bool `json:"auto_collect"`
 	// CollectModels limits on-demand collection to these models (canonical
 	// names). Empty means only ProbeModel. Other auxiliary models won't trigger.
@@ -85,8 +84,9 @@ type Config struct {
 	InjectState bool `json:"inject_state"`
 	// StateTTLSeconds is how long a cached turn-state stays usable.
 	StateTTLSeconds int `json:"state_ttl_seconds"`
-	// StateLengths is the target state length(s), e.g. [292]. A node that
-	// returns one of these is considered "good" and its value is injected.
+	// StateLengths is the target state length(s): 292 for personal, 332 for
+	// Team/Business. A node returning one of these is "good"; its value is
+	// cached and injected.
 	StateLengths []int `json:"state_lengths"`
 	// InjectNodeAffinity, when true, only injects a state through the node that
 	// produced it. Default false: 292 may be injected across nodes.
@@ -135,7 +135,8 @@ func Default() Config {
 		TimeoutSec:                120,
 		InjectState:               true,
 		StateTTLSeconds:           3600,
-		StateLengths:              []int{292},
+		StateLengths:              []int{292, 332},
+		AutoCollect:               true,
 		AutoConfigCodex:           true,
 		RestoreOnExit:             true,
 	}
