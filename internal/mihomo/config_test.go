@@ -46,10 +46,17 @@ func TestGenerateConfigIncludesHealthAndGroups(t *testing.T) {
 	}
 }
 
-func TestGenerateConfigNoSources(t *testing.T) {
+func TestGenerateConfigNoSourcesFallsBackToDirect(t *testing.T) {
 	c := config.Default()
-	if _, err := GenerateConfig(c, nil); err == nil {
-		t.Fatal("expected error with no sources")
+	out, err := GenerateConfig(c, nil)
+	if err != nil {
+		t.Fatalf("empty config should still generate (DIRECT fallback): %v", err)
+	}
+	if !strings.Contains(out, "DIRECT") {
+		t.Fatalf("expected DIRECT fallback:\n%s", out)
+	}
+	if !strings.Contains(out, "- MATCH,CODEX") {
+		t.Fatalf("expected rules:\n%s", out)
 	}
 }
 

@@ -13,8 +13,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -29,7 +31,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -306,7 +308,8 @@ func runServe(cfgPath, codexHome string) {
 	cfg, err := config.Load(cfgPath)
 	fatal(err)
 	if !cfg.HasSources() {
-		fatal(fmt.Errorf("no subscriptions or proxies configured in %s", cfgPath))
+		log.Printf("no subscriptions/proxies yet; starting anyway. Open the panel and add a subscription:")
+		log.Printf("  http://%s/panel  (or run: ccodex-rotate sub add \"https://...\")", cfg.Listen)
 	}
 	dataDir := config.DataDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -484,6 +487,7 @@ func runServe(cfgPath, codexHome string) {
 	}()
 	log.Printf("proxy: http://%s/backend-api/codex   panel: http://%s/panel", cfg.Listen, cfg.Listen)
 	log.Printf("press Ctrl+C to stop")
+	go openBrowser("http://" + cfg.Listen + "/panel")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -504,7 +508,7 @@ func runCheck(cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	fatal(err)
 	if !cfg.HasSources() {
-		fatal(fmt.Errorf("no subscriptions or proxies configured in %s", cfgPath))
+		log.Printf("WARN: no subscriptions/proxies yet; add one with `sub add` or in the panel")
 	}
 	bin, err := mihomo.FindBinary(cfg)
 	if err != nil {
@@ -654,4 +658,21 @@ func fatal(err error) {
 	if err != nil {
 		log.Fatalf("error: %v", err)
 	}
+}
+
+// openBrowser opens a URL in the default browser on macOS/Windows/Linux.
+func openBrowser(url string) {
+	var name string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		name = "open"
+	case "windows":
+		name = "rundll32"
+		args = []string{"url.dll,FileProtocolHandler"}
+	default:
+		name = "xdg-open"
+	}
+	args = append(args, url)
+	_ = exec.Command(name, args...).Start()
 }

@@ -29,10 +29,6 @@ type Provider struct {
 //   - exposes an AUTO url-test group and a CODEX selector that also allows
 //     pinning a single node.
 func GenerateConfig(cfg config.Config, providers []Provider) (string, error) {
-	if len(providers) == 0 && len(cfg.Proxies) == 0 {
-		return "", fmt.Errorf("no subscriptions or proxies configured")
-	}
-
 	var b strings.Builder
 	fmt.Fprintf(&b, "mixed-port: %d\n", cfg.MixedPort)
 	b.WriteString("allow-lan: false\n")
@@ -83,6 +79,11 @@ func GenerateConfig(cfg config.Config, providers []Provider) (string, error) {
 			explicit = append(explicit, name)
 			b.WriteString("  " + line + "\n")
 		}
+	}
+	// With no sources at all, run through DIRECT so the service can start and
+	// the panel can be used to add subscriptions/nodes.
+	if len(explicit) == 0 && len(providerNames) == 0 {
+		explicit = []string{"DIRECT"}
 	}
 
 	b.WriteString("proxy-groups:\n")
