@@ -93,6 +93,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"requests":         reqs,
 		"errors":           errs,
 		"recent":           recent,
+		"collect_log":      p.Eg.CollectLog(),
 		"states":           p.Proxy.StateSnapshot(),
 		"mihomo_error":     errString(p.Mgr.Err()),
 	}
@@ -268,6 +269,8 @@ td,th{padding:5px 8px;border-bottom:1px solid #8882;text-align:left;white-space:
 .ok{background:#2ecc71}.warn{background:#f1c40f}.bad{background:#e74c3c}.unk{background:#95a5a6}
 code{background:#8882;padding:1px 5px;border-radius:5px}
 .tag{display:inline-block;padding:1px 7px;border-radius:20px;background:#8882;font-size:12px}
+.cols{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start}
+.cols>.card{flex:1 1 360px;min-width:300px}
 </style></head>
 <body>
 <h1>ccodex-rotate</h1>
@@ -322,9 +325,15 @@ code{background:#8882;padding:1px 5px;border-radius:5px}
   <div id="list" class="muted">加载中…</div>
 </div>
 
-<div class="card">
-  <h2>最近请求</h2>
-  <div id="recent" class="muted">—</div>
+<div class="cols">
+  <div class="card">
+    <h2>凭据获取日志</h2>
+    <div id="collectLog" class="muted">—</div>
+  </div>
+  <div class="card">
+    <h2>会话日志</h2>
+    <div id="recent" class="muted">—</div>
+  </div>
 </div>
 <script>
 async function act(p){await fetch(p,{method:'POST'});refresh();}
@@ -349,7 +358,7 @@ async function use(name){await fetch('/api/pin',{method:'POST',headers:{'Content
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function ts(v){if(!v||v.indexOf('0001')===0)return '—';return new Date(v).toLocaleString();}
 function ago(v){if(!v||v.indexOf('0001')===0)return '';var s=Math.floor((Date.now()-new Date(v))/1000);if(s<60)return s+'秒前';if(s<3600)return Math.floor(s/60)+'分前';return Math.floor(s/3600)+'时前';}
-var stateLabel={ok:'可用·292',reachable:'可达(非292)',unknown:'未测',failed:'失败'};
+var stateLabel={ok:'可用',reachable:'无法获取',unknown:'未测',failed:'失败'};
 var stateDot={ok:'ok',reachable:'warn',unknown:'unk',failed:'bad'};
 async function refresh(){
  try{
@@ -394,6 +403,12 @@ async function refresh(){
   }).join('');
   document.getElementById('recent').innerHTML = rr
     ? '<table><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>节点</th><th>模型</th><th>注入</th><th>尝试</th><th>耗时</th></tr>'+rr+'</table>'
+    : '—';
+  var cl=(s.collect_log||[]).map(function(x){
+    return '<tr><td>'+new Date(x.time).toLocaleTimeString()+'</td><td>'+esc(x.model||'')+'</td><td>'+esc(x.msg)+'</td></tr>';
+  }).join('');
+  document.getElementById('collectLog').innerHTML = cl
+    ? '<table><tr><th>时间</th><th>模型</th><th>事件</th></tr>'+cl+'</table>'
     : '—';
   if(s.mihomo_error){var el=document.getElementById('recent');el.innerHTML='<b style="color:#e74c3c">'+esc(s.mihomo_error)+'</b><br>'+el.innerHTML;}
  }catch(e){document.getElementById('list').textContent='读取失败：'+e;}

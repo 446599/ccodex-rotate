@@ -13,6 +13,13 @@ import (
 	"ccodex-rotate/internal/pool"
 )
 
+// CollectEvent is one entry in the credential-collection log.
+type CollectEvent struct {
+	Time  time.Time `json:"time"`
+	Model string    `json:"model,omitempty"`
+	Msg   string    `json:"msg"`
+}
+
 // Egress is the rotating egress used by the reverse proxy. Every connection
 // goes through the local mihomo mixed port; node health is discovered lazily
 // and remembered, so failed/blocked nodes are skipped on later requests.
@@ -30,8 +37,29 @@ type Egress struct {
 	collectTotal  int
 	lastSeenLen   int
 	lastSeenModel string
+	collectLog    []CollectEvent
 	probe         ProbeFunc
 	manual        bool // forwarding exit manually pinned; collection ignores it
+}
+
+func (e *Egress) logEvent(model, msg string) {
+	e.mu.Lock()
+	e.collectLog = append(e.collectLog, CollectEvent{Time: time.Now(), Model: model, Msg: msg})
+	if len(e.collectLog) > 100 {
+		e.collectLog = e.collectLog[len(e.collectLog)-100:]
+	}
+	e.mu.Unlock()
+}
+
+// CollectLog returns the credential-collection log, newest first.
+func (e *Egress) CollectLog() []CollectEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]CollectEvent, len(e.collectLog))
+	for i, ev := range e.collectLog {
+		out[len(e.collectLog)-1-i] = ev
+	}
+	return out
 }
 
 // ProbeFunc performs one collection attempt through the current node and
@@ -291,6 +319,7 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		candidates = cooling
 	}
 	names := candidates
+	e.logEvent(model, fmt.Sprintf("开始采集：候选 %d 个（跳过 %d 个冷却节点）", len(names), len(cooling)))
 
 	e.mu.Lock()
 	e.collectTotal = len(names)
@@ -328,6 +357,7 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		switch {
 		case err == nil && length > 0 && (len(targets) == 0 || targets[length]):
 			e.p.MarkOK(name, 0)
+			e.logEvent(model, fmt.Sprintf("采到 %d 字符 @ %s", length, name))
 			e.finishCollect(true)
 			return true
 		case err != nil:
@@ -346,6 +376,7 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		}
 	}
 	e.finishCollect(false)
+	e.logEvent(model, "本轮未采到合格凭据")
 	return false
 }
 
