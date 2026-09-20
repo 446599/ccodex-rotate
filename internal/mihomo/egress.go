@@ -38,6 +38,7 @@ type Egress struct {
 	lastSeenLen   int
 	lastSeenModel string
 	collectLog    []CollectEvent
+	stopCollect   context.CancelFunc
 	probe         ProbeFunc
 	manual        bool // forwarding exit manually pinned; collection ignores it
 }
@@ -289,12 +290,17 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 	}
 	e.collecting = true
 	probe := e.probe
+	cctx, cancel := context.WithCancel(ctx)
+	e.stopCollect = cancel
 	e.mu.Unlock()
 	defer func() {
+		cancel()
 		e.mu.Lock()
 		e.collecting = false
+		e.stopCollect = nil
 		e.mu.Unlock()
 	}()
+	ctx = cctx
 
 	if err := e.RefreshNodes(ctx); err != nil {
 		e.finishCollect(false)
@@ -376,8 +382,23 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		}
 	}
 	e.finishCollect(false)
-	e.logEvent(model, "本轮未采到合格凭据")
+	if ctx.Err() != nil {
+		e.logEvent(model, "采集已停止")
+	} else {
+		e.logEvent(model, "本轮未采到合格凭据")
+	}
 	return false
+}
+
+// StopCollect interrupts an in-progress collection round.
+func (e *Egress) StopCollect() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopCollect == nil {
+		return false
+	}
+	e.stopCollect()
+	return true
 }
 
 // preferOK orders candidates so nodes already known to yield the target state

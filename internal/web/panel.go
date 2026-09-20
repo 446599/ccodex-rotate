@@ -38,6 +38,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/nodes", p.nodes)
 	mux.HandleFunc("/api/rotate", p.rotate)
 	mux.HandleFunc("/api/collect", p.collect)
+	mux.HandleFunc("/api/collect/stop", p.collectStop)
 	mux.HandleFunc("/api/scan", p.collect)
 	mux.HandleFunc("/api/injection", p.injection)
 	mux.HandleFunc("/api/sources/add", p.sourcesAdd)
@@ -146,6 +147,11 @@ func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
 		go p.Eg.Collect(context.Background(), p.ProbeModel)
 	}
 	writeJSON(w, map[string]any{"started": true})
+}
+
+func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
+	stopped := p.Eg.StopCollect()
+	writeJSON(w, map[string]any{"stopped": stopped})
 }
 
 func (p *Panel) injection(w http.ResponseWriter, r *http.Request) {
@@ -294,6 +300,7 @@ code{background:#8882;padding:1px 5px;border-radius:5px}
   <div class="row"><span>代理地址 / 上游</span><span class="muted"><code>{{.Listen}}</code> → <code>{{.Upstream}}</code></span></div>
   <div class="row" style="margin-top:10px">
     <span><button onclick="act('/api/collect')">立即采集 292</button>
+    <button id="stopBtn" onclick="act('/api/collect/stop')" style="display:none;border-color:#e74c3c">停止采集</button>
     <button onclick="act('/api/rotate')">换一个节点</button>
     <button onclick="act('/api/reset')">恢复自动</button></span>
   </div>
@@ -380,6 +387,8 @@ async function refresh(){
     if(s.collecting){pw.style.display='block';var tot=s.collect_total||0;var tr=s.collect_tried||0;var pct=tot?Math.floor(tr*100/tot):0;document.getElementById('prog').style.width=pct+'%';document.getElementById('progText').textContent='正在逐个节点探测 '+tr+' / '+tot+'（找到即停）';}
     else{pw.style.display='none';}
   }
+  var sb=document.getElementById('stopBtn');
+  if(sb) sb.style.display=s.collecting?'inline-block':'none';
   document.getElementById('cfg').textContent=(s.target_lengths||[]).join(',')+' 字符 · '+s.probe_model+' · 成功'+s.success_interval+'s/失败'+s.retry_interval+'s';
   if(document.getElementById('srcCounts')) document.getElementById('srcCounts').textContent='订阅 '+s.subs+' · 节点 '+s.nodes+' · 代理 '+s.proxies;
   var st=s.states||[];
@@ -395,14 +404,17 @@ async function refresh(){
   var n=await (await fetch('/api/nodes')).json();
   var rows=(n.nodes||[]).map(function(x){
     var lb=stateLabel[x.state]||x.state;
-    return '<tr><td><span class="dot '+(stateDot[x.state]||'unk')+'"></span>'+esc(x.name)+'</td><td>'+esc(x.type||'')+'</td><td>'+lb+'</td><td>'+(x.alive?(x.delay>0?x.delay+' ms':'—'):'—')+'</td><td><button onclick="use(\''+esc(x.name)+'\')">用于转发</button></td></tr>';
+    var pinned=(s.manual&&x.name===s.manual);
+    var btn='<button onclick="use(\''+esc(x.name)+'\')"'+(pinned?' style="border-color:#2ecc71;color:#2ecc71;font-weight:bold"':'')+'>'+(pinned?'已固定转发':'用于转发')+'</button>';
+    return '<tr><td><span class="dot '+(stateDot[x.state]||'unk')+'"></span>'+esc(x.name)+'</td><td>'+esc(x.type||'')+'</td><td>'+lb+'</td><td>'+(x.alive?(x.delay>0?x.delay+' ms':'—'):'—')+'</td><td>'+btn+'</td></tr>';
   }).join('');
   document.getElementById('list').innerHTML='<table><tr><th>节点</th><th>类型</th><th>状态</th><th>延迟</th><th></th></tr>'+rows+'</table>';
   var rr=(s.recent||[]).map(function(x){
     return '<tr><td>'+new Date(x.time).toLocaleTimeString()+'</td><td>'+esc(x.method)+'</td><td>'+esc(x.path)+'</td><td>'+x.status+'</td><td>'+esc(x.node)+'</td><td>'+esc(x.model||'')+'</td><td>'+(x.injected?'是':'否')+'</td><td>'+x.attempts+'</td><td>'+x.millis+' ms</td></tr>';
   }).join('');
+  var mh=(s.recent||[]).map(function(x){return x.model;}).filter(Boolean)[0]||'模型';
   document.getElementById('recent').innerHTML = rr
-    ? '<table><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>节点</th><th>模型</th><th>注入</th><th>尝试</th><th>耗时</th></tr>'+rr+'</table>'
+    ? '<table><tr><th>时间</th><th>方法</th><th>路径</th><th>状态</th><th>节点</th><th>'+esc(mh)+'</th><th>注入</th><th>尝试</th><th>耗时</th></tr>'+rr+'</table>'
     : '—';
   var cl=(s.collect_log||[]).map(function(x){
     return '<tr><td>'+new Date(x.time).toLocaleTimeString()+'</td><td>'+esc(x.model||'')+'</td><td>'+esc(x.msg)+'</td></tr>';
