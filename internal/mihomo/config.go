@@ -10,8 +10,9 @@ import (
 
 // provider names are fixed so the manager can address them.
 const (
-	AutoGroup = "AUTO"
-	MainGroup = "CODEX"
+	AutoGroup    = "AUTO"
+	MainGroup    = "CODEX"   // forwarding (may be manually pinned)
+	CollectGroup = "COLLECT" // credential collection (always auto)
 )
 
 // Provider is a locally cached subscription file loaded by mihomo.
@@ -107,6 +108,30 @@ func GenerateConfig(cfg config.Config, providers []Provider) (string, error) {
 			fmt.Fprintf(&b, "      - %s\n", yq(p))
 		}
 	}
+
+	// COLLECT group + a dedicated inbound: credential collection is routed
+	// through it, so a manual forwarding choice never affects collection.
+	fmt.Fprintf(&b, "  - name: %s\n", yq(CollectGroup))
+	b.WriteString("    type: select\n")
+	if len(explicit) > 0 {
+		b.WriteString("    proxies:\n")
+		for _, p := range explicit {
+			fmt.Fprintf(&b, "      - %s\n", yq(p))
+		}
+	}
+	if len(providerNames) > 0 {
+		b.WriteString("    use:\n")
+		for _, p := range providerNames {
+			fmt.Fprintf(&b, "      - %s\n", yq(p))
+		}
+	}
+
+	b.WriteString("listeners:\n")
+	b.WriteString("  - name: collect-in\n")
+	b.WriteString("    type: mixed\n")
+	fmt.Fprintf(&b, "    port: %d\n", cfg.CollectPort)
+	b.WriteString("    listen: 127.0.0.1\n")
+	fmt.Fprintf(&b, "    proxy: %s\n", yq(CollectGroup))
 
 	b.WriteString("rules:\n")
 	fmt.Fprintf(&b, "  - MATCH,%s\n", MainGroup)

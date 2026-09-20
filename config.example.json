@@ -2,6 +2,7 @@
   "listen": "127.0.0.1:17850",
   "upstream_base": "https://chatgpt.com",
   "mixed_port": 17890,
+  "collect_port": 17892,
   "controller_port": 17891,
   "controller_secret": "",
   "mihomo_path": "",

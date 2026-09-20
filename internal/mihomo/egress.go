@@ -27,6 +27,7 @@ type Egress struct {
 	lastCollectOK bool
 	nextCollect   time.Time
 	probe         ProbeFunc
+	manual        bool // forwarding exit manually pinned; collection ignores it
 }
 
 // ProbeFunc performs one collection attempt through the current node and
@@ -38,9 +39,23 @@ type ProbeFunc func(ctx context.Context, client *http.Client) (length int, reach
 // plain unauthenticated reachability probe is used.
 func (e *Egress) SetProbe(f ProbeFunc) { e.probe = f }
 
-// Client returns an HTTP client bound to the mihomo mixed port.
+// Client returns an HTTP client bound to the mihomo mixed port (forwarding).
 func (e *Egress) Client(timeout time.Duration) *http.Client {
 	u, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", e.m.cfg.MixedPort))
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:              http.ProxyURL(u),
+			DisableKeepAlives:  true,
+			DisableCompression: true,
+		},
+	}
+}
+
+// collectClient returns a client bound to the dedicated collection inbound
+// (COLLECT group), independent of the forwarding exit.
+func (e *Egress) collectClient(timeout time.Duration) *http.Client {
+	u, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", e.m.cfg.CollectPort))
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -132,9 +147,14 @@ func (e *Egress) Init(ctx context.Context) error {
 }
 
 // Rotate marks the current node as failed and switches to the next usable node.
+// When the forwarding exit is manually pinned, rotation is disabled (the pin is
+// respected); collection is unaffected either way.
 func (e *Egress) Rotate(ctx context.Context, reason string) (string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.manual {
+		return e.current, false
+	}
 	cur := e.current
 	return e.pickLocked(ctx, cur, reason)
 }
@@ -150,6 +170,9 @@ func (e *Egress) Success() {
 func (e *Egress) EnsureHealthy(ctx context.Context) (string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.manual {
+		return e.current, false
+	}
 	var curState string
 	for _, e2 := range e.p.Snapshot() {
 		if e2.Name == e.current {
@@ -171,6 +194,7 @@ func (e *Egress) Reset(ctx context.Context) error {
 	if err := e.m.Select(ctx, MainGroup, AutoGroup); err != nil {
 		return err
 	}
+	e.manual = false
 	e.current = ""
 	proxies, err := e.m.Proxies(ctx)
 	if err == nil {
@@ -181,12 +205,12 @@ func (e *Egress) Reset(ctx context.Context) error {
 	return nil
 }
 
-// PinUser forces a specific node chosen from the panel.
+// PinUser forces a specific forwarding node chosen from the panel.
 func (e *Egress) PinUser(ctx context.Context, name string) error {
 	return e.Pin(ctx, name)
 }
 
-// Pin binds the current node to name.
+// Pin binds the forwarding exit to name and marks it manual.
 func (e *Egress) Pin(ctx context.Context, name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -194,7 +218,18 @@ func (e *Egress) Pin(ctx context.Context, name string) error {
 		return err
 	}
 	e.current = name
+	e.manual = true
 	return nil
+}
+
+// Manual reports the manually pinned forwarding exit ("" when automatic).
+func (e *Egress) Manual() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.manual {
+		return ""
+	}
+	return e.current
 }
 
 // Snapshot returns the node health records.
@@ -237,7 +272,8 @@ func (e *Egress) Collect(ctx context.Context) bool {
 	if timeout <= 0 {
 		timeout = 12 * time.Second
 	}
-	client := e.Client(timeout)
+	// Collection uses the dedicated COLLECT inbound, never the forwarding exit.
+	client := e.collectClient(timeout)
 	targets := e.targetLengths()
 	if probe == nil {
 		probe = e.reachabilityProbe
@@ -248,12 +284,9 @@ func (e *Egress) Collect(ctx context.Context) bool {
 		if ctx.Err() != nil {
 			break
 		}
-		if err := e.m.Select(ctx, MainGroup, name); err != nil {
+		if err := e.m.Select(ctx, CollectGroup, name); err != nil {
 			continue
 		}
-		e.mu.Lock()
-		e.current = name
-		e.mu.Unlock()
 		length, reachable, _, err := probe(ctx, client)
 		tried++
 		switch {

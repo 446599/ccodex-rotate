@@ -34,6 +34,9 @@ func TestGenerateConfigIncludesHealthAndGroups(t *testing.T) {
 		"type: url-test",
 		"name: 'AUTO'",
 		"name: 'CODEX'",
+		"name: 'COLLECT'",
+		"listeners:",
+		"proxy: 'COLLECT'",
 		"- MATCH,CODEX",
 		"allow-lan: false",
 	} {

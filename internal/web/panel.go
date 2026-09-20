@@ -66,6 +66,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"listen":           p.Listen,
 		"upstream":         p.Upstream,
 		"node":             node,
+		"manual":           p.Eg.Manual(),
 		"alive":            ok + reachable + unknown,
 		"ok":               ok,
 		"reachable":        reachable,
@@ -254,7 +255,7 @@ code{background:#8882;padding:1px 5px;border-radius:5px}
 
 <div class="card">
   <h2>概览</h2>
-  <div class="row"><b>当前出口</b><span id="node" class="muted">…</span></div>
+  <div class="row"><b>转发出口</b><span id="node" class="muted">…</span></div>
   <div class="row"><span>节点质量（可用292 / 可达 / 未测 / 失败 / 总）</span><span id="counts2" class="muted">…</span></div>
   <div class="row"><span>请求 / 错误</span><span id="counts" class="muted">…</span></div>
   <div class="row"><span>上次采集</span><span id="scan" class="muted">…</span></div>
@@ -290,6 +291,7 @@ code{background:#8882;padding:1px 5px;border-radius:5px}
 
 <div class="card">
   <h2>节点</h2>
+  <p class="muted">「使用」= 固定转发出口（仅影响消息转发；采集凭据仍自动轮询，不受影响）。「恢复自动」解除固定。</p>
   <div id="list" class="muted">加载中…</div>
 </div>
 
@@ -320,7 +322,7 @@ var stateDot={ok:'ok',reachable:'warn',unknown:'unk',failed:'bad'};
 async function refresh(){
  try{
   var s=await (await fetch('/api/status')).json();
-  document.getElementById('node').textContent=s.node||'(自动)';
+  document.getElementById('node').textContent=(s.node||'(自动)')+(s.manual?('  【手动·仅转发】'):'  【自动】');
   document.getElementById('counts2').textContent=s.ok+' / '+s.reachable+' / '+s.unknown+' / '+s.failed+' / '+s.total;
   document.getElementById('counts').textContent=s.requests+' / '+s.errors;
   var sc='—';
@@ -343,7 +345,7 @@ async function refresh(){
   var n=await (await fetch('/api/nodes')).json();
   var rows=(n.nodes||[]).map(function(x){
     var lb=stateLabel[x.state]||x.state;
-    return '<tr><td><span class="dot '+(stateDot[x.state]||'unk')+'"></span>'+esc(x.name)+'</td><td>'+esc(x.type||'')+'</td><td>'+lb+'</td><td>'+(x.alive?(x.delay>0?x.delay+' ms':'—'):'—')+'</td><td><button onclick="use(\''+esc(x.name)+'\')">使用</button></td></tr>';
+    return '<tr><td><span class="dot '+(stateDot[x.state]||'unk')+'"></span>'+esc(x.name)+'</td><td>'+esc(x.type||'')+'</td><td>'+lb+'</td><td>'+(x.alive?(x.delay>0?x.delay+' ms':'—'):'—')+'</td><td><button onclick="use(\''+esc(x.name)+'\')">用于转发</button></td></tr>';
   }).join('');
   document.getElementById('list').innerHTML='<table><tr><th>节点</th><th>类型</th><th>状态</th><th>延迟</th><th></th></tr>'+rows+'</table>';
   var rr=(s.recent||[]).map(function(x){

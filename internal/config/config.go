@@ -18,8 +18,12 @@ type Config struct {
 	Listen string `json:"listen"`
 	// UpstreamBase is the real Codex backend origin (no trailing slash).
 	UpstreamBase string `json:"upstream_base"`
-	// MixedPort is the local mihomo mixed (HTTP/SOCKS) port.
+	// MixedPort is the local mihomo mixed (HTTP/SOCKS) port used for forwarding.
 	MixedPort int `json:"mixed_port"`
+	// CollectPort is a second mihomo inbound used only for credential
+	// collection, bound to the COLLECT group, so a manual forward choice never
+	// affects collection.
+	CollectPort int `json:"collect_port"`
 	// ControllerPort is the local mihomo external-controller port.
 	ControllerPort int `json:"controller_port"`
 	// ControllerSecret protects the mihomo controller.
@@ -112,6 +116,7 @@ func Default() Config {
 		Listen:                    "127.0.0.1:17850",
 		UpstreamBase:              "https://chatgpt.com",
 		MixedPort:                 17890,
+		CollectPort:               17892,
 		ControllerPort:            17891,
 		ControllerSecret:          randomSecret(),
 		Subscriptions:             nil,
@@ -205,6 +210,9 @@ func (c *Config) normalize(path string) error {
 	c.UpstreamBase = strings.TrimRight(c.UpstreamBase, "/")
 	if c.MixedPort == 0 {
 		c.MixedPort = 17890
+	}
+	if c.CollectPort == 0 {
+		c.CollectPort = 17892
 	}
 	if c.ControllerPort == 0 {
 		c.ControllerPort = 17891
