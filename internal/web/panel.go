@@ -405,8 +405,8 @@ async function refresh(){
   else if(!s.auth_ready) stMsg='尚未获得账号凭据：在 Codex 里发一条消息后会自动开始采集';
   else stMsg='尚无合格 292/332 凭据，正在按间隔重试'+(obs?('；'+obs):'');
   document.getElementById('states').innerHTML = st.length
-    ? '<table><tr><th>模型</th><th>长度</th><th>来源节点</th><th>类型</th><th>采集时间</th><th>剩余有效期</th><th>已注入</th></tr>'+
-      st.map(function(x){var exp=new Date(x.created).getTime()+(Number(s.state_ttl)||3600)*1000;var src=(x.source==='traffic')?'会话':'探测';return '<tr><td>'+esc(x.model)+'</td><td><b>'+x.length+'</b> 字符</td><td>'+esc(x.node||'-')+'</td><td>'+src+'</td><td>'+ts(x.created)+' '+ago(x.created)+'</td><td data-exp="'+exp+'">—</td><td>'+x.hits+'</td></tr>';}).join('')+'</table>'
+    ? '<table><tr><th>模型</th><th>长度</th><th>来源节点</th><th>采集时间</th><th>剩余有效期</th><th>已注入</th></tr>'+
+      st.map(function(x){var exp=new Date(x.created).getTime()+(Number(s.state_ttl)||3600)*1000;return '<tr><td>'+esc(x.model)+'</td><td><b>'+x.length+'</b> 字符</td><td>'+esc(x.node||'-')+'</td><td>'+ts(x.created)+' '+ago(x.created)+'</td><td data-exp="'+exp+'">—</td><td>'+x.hits+'</td></tr>';}).join('')+'</table>'
     : stMsg;
   tick();
   var n=await (await fetch('/api/nodes')).json();

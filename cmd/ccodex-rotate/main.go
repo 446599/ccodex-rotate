@@ -31,7 +31,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.3.9"
+const version = "0.3.8"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -378,7 +378,7 @@ func runServe(cfgPath, codexHome string) {
 			})
 		}
 		srv.SetCollectModels(cfg.CollectModels)
-		go collectLoop(ctx, cfg, eg, trigger, srv.HasValidState, srv.InFlight)
+		go collectLoop(ctx, cfg, eg, trigger, srv.HasValidState)
 	}
 
 	panel := &web.Panel{
@@ -583,7 +583,7 @@ func runCollect(cfgPath string) {
 // minutes after failure. It collects every target model (ProbeModel plus
 // CollectModels such as the review model), probing nodes one at a time and
 // stopping on the first success per model.
-func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trigger <-chan struct{}, haveState func(string) bool, inFlight func() int64) {
+func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trigger <-chan struct{}, haveState func(string) bool) {
 	targets := append([]string{cfg.ProbeModel}, cfg.CollectModels...)
 	// Do not collect until the client actually asks for a target model.
 	select {
@@ -610,18 +610,6 @@ func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trig
 				return
 			case <-trigger:
 			case <-time.After(time.Duration(cfg.CollectSuccessIntervalSec) * time.Second):
-			}
-			continue
-		}
-		// Never collect while a Codex request is in flight: probing the same
-		// account concurrently rotates the upstream turn-state and would break
-		// the live session.
-		if inFlight != nil && inFlight() > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-trigger:
-			case <-time.After(3 * time.Second):
 			}
 			continue
 		}

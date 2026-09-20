@@ -63,7 +63,6 @@ type Server struct {
 
 	reqCount int64
 	errCount int64
-	inflight int64
 	mu       sync.Mutex
 
 	authMu    sync.Mutex
@@ -143,9 +142,6 @@ func (s *Server) SetInjection(on bool) { s.inject.Store(on) }
 
 // InjectionEnabled reports whether credential injection is on.
 func (s *Server) InjectionEnabled() bool { return s.inject.Load() }
-
-// InFlight reports how many Codex requests are currently being handled.
-func (s *Server) InFlight() int64 { return atomic.LoadInt64(&s.inflight) }
 
 // StateTTLSeconds is the credential validity window.
 func (s *Server) StateTTLSeconds() int { return s.cfg.StateTTLSeconds }
@@ -255,7 +251,7 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 		if s.eg != nil {
 			node = s.eg.Current()
 		}
-		s.state.Put(account, model, node, value, "probe")
+		s.state.Put(account, model, node, value)
 	}
 	return length, true, value, nil
 }
@@ -304,9 +300,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-
-	atomic.AddInt64(&s.inflight, 1)
-	defer atomic.AddInt64(&s.inflight, -1)
 
 	body, replayable, err := readBody(r, int64(s.cfg.MaxBodyMiB)<<20)
 	if err != nil {
@@ -369,23 +362,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Host = "" // let net/http set from URL
 		req.ContentLength = int64(len(body))
 
-		// Inject a cached turn-state (can be toggled off at runtime). A probe
-		// state must not override a state the live session already carries, or
-		// the upstream would cut the stream.
+		// Inject a cached turn-state (can be toggled off at runtime).
 		if s.inject.Load() && s.state != nil && model != "" {
 			if e, ok := s.state.Get(account, model); ok && s.lengthAllowed(e.Length) {
-				if e.Source == "probe" && req.Header.Get("X-Codex-Turn-State") != "" {
-					// keep the in-session state
-				} else {
-					inject := true
-					if s.cfg.InjectNodeAffinity && e.Node != "" && e.Node != s.eg.Current() {
-						inject = s.eg.Pin(ctx, e.Node) == nil
-					}
-					if inject {
-						req.Header.Set("X-Codex-Turn-State", e.Value)
-						s.state.Hit(account, model)
-						injectedAny = true
-					}
+				inject := true
+				if s.cfg.InjectNodeAffinity && e.Node != "" && e.Node != s.eg.Current() {
+					inject = s.eg.Pin(ctx, e.Node) == nil
+				}
+				if inject {
+					req.Header.Set("X-Codex-Turn-State", e.Value)
+					s.state.Hit(account, model)
+					injectedAny = true
 				}
 			}
 		}
@@ -407,7 +394,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// both collection and injection).
 		if s.state != nil && model != "" {
 			if v := resp.Header.Get("X-Codex-Turn-State"); v != "" && s.lengthAllowed(len(v)) {
-				s.state.Put(account, model, s.eg.Current(), v, "traffic")
+				s.state.Put(account, model, s.eg.Current(), v)
 			}
 		}
 		if retriableStatus(resp.StatusCode) && attempt+1 < maxAttempts {
