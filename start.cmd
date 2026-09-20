@@ -1,6 +1,7 @@
 @echo off
+chcp 65001 >nul 2>&1
 setlocal
-rem Windows launcher for ccodex-rotate. Double-click start.cmd.
+cd /d "%~dp0"
 set "DIR=%~dp0"
 set "CFG=%USERPROFILE%\.ccodex-rotate\config.json"
 
@@ -8,17 +9,25 @@ set "BIN=%DIR%ccodex-rotate.exe"
 if not exist "%BIN%" set "BIN=%DIR%dist\ccodex-rotate-windows-amd64.exe"
 if not exist "%BIN%" set "BIN=%DIR%dist\ccodex-rotate-windows-arm64.exe"
 if not exist "%BIN%" (
-  echo 找不到 ccodex-rotate.exe，请先运行 build.ps1 或 build.bat
+  echo [ccodex-rotate] ccodex-rotate.exe not found. Run build.bat or build.ps1 first.
+  echo.
   pause
   exit /b 1
 )
 
 if not exist "%CFG%" (
-  echo 首次运行：请先配置订阅链接，例如：
-  echo   "%BIN%" sub add "https://你的订阅链接"
+  echo [ccodex-rotate] First run. Configure your subscription link first, for example:
+  echo   "%BIN%" sub add "https://your-subscription-url"
+  echo.
   "%BIN%" init --config "%CFG%"
+  echo.
 )
 
-echo 启动 ccodex-rotate（不修改系统代理，也不影响本地 Clash）。按 Ctrl+C 停止并还原 Codex 配置。
+echo [ccodex-rotate] Starting. It does NOT change the system proxy and does NOT stop your Clash.
+echo Press Ctrl+C to stop and restore the Codex config.
+echo.
 "%BIN%" serve --config "%CFG%"
+echo.
+echo [ccodex-rotate] exited with code %ERRORLEVEL%.
+echo If the window closed too fast, run this file from a terminal to see the full output.
 pause
