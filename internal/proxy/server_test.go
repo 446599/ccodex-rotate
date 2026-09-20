@@ -253,7 +253,7 @@ func TestProbeCollectsTargetLengthState(t *testing.T) {
 	srv.auth, srv.account, srv.lastModel = "Bearer test", "acct", "gpt-6-astra"
 	srv.authMu.Unlock()
 
-	length, reachable, value, err := srv.Probe(context.Background(), &http.Client{})
+	length, reachable, value, err := srv.Probe(context.Background(), &http.Client{}, "gpt-6-astra")
 	if err != nil || !reachable {
 		t.Fatalf("probe failed: len=%d reachable=%v err=%v", length, reachable, err)
 	}
@@ -282,7 +282,7 @@ func TestProbeRejectsWrongLength(t *testing.T) {
 	srv.auth, srv.account, srv.lastModel = "Bearer test", "acct", "gpt-6-astra"
 	srv.authMu.Unlock()
 
-	length, reachable, _, _ := srv.Probe(context.Background(), &http.Client{})
+	length, reachable, _, _ := srv.Probe(context.Background(), &http.Client{}, "gpt-6-astra")
 	if length != 312 || !reachable {
 		t.Fatalf("expected 312 observed, got len=%d reachable=%v", length, reachable)
 	}

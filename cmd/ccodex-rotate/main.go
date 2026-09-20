@@ -31,7 +31,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.3.2"
+const version = "0.3.3"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -378,7 +378,7 @@ func runServe(cfgPath, codexHome string) {
 			})
 		}
 		srv.SetCollectModels(cfg.CollectModels)
-		go collectLoop(ctx, cfg, eg, trigger)
+		go collectLoop(ctx, cfg, eg, trigger, srv.HasValidState)
 	}
 
 	panel := &web.Panel{
@@ -577,10 +577,13 @@ func runCollect(cfgPath string) {
 // collectLoop collects a turn-state, then waits 30 minutes after success or
 // 5 minutes after failure, and also runs immediately when triggered on demand.
 // It probes nodes one at a time and stops on the first success.
-// collectLoop waits for a real request (a target model with no 292) before the
-// first collection, then refreshes 30 minutes after success or retries 5
-// minutes after failure. It probes nodes one at a time and stops on success.
-func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trigger <-chan struct{}) {
+// collectLoop waits for a real request (a target model with no state) before
+// the first collection, then refreshes 30 minutes after success or retries 5
+// minutes after failure. It collects every target model (ProbeModel plus
+// CollectModels such as the review model), probing nodes one at a time and
+// stopping on the first success per model.
+func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trigger <-chan struct{}, haveState func(string) bool) {
+	targets := append([]string{cfg.ProbeModel}, cfg.CollectModels...)
 	// Do not collect until the client actually asks for a target model.
 	select {
 	case <-ctx.Done():
@@ -589,7 +592,27 @@ func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trig
 		log.Printf("first target request seen; collecting turn-state")
 	}
 	for {
-		ok := eg.Collect(ctx)
+		need := ""
+		for _, m := range targets {
+			if m == "" {
+				continue
+			}
+			if !haveState(m) {
+				need = m
+				break
+			}
+		}
+		if need == "" {
+			// Every target model already has a usable state.
+			select {
+			case <-ctx.Done():
+				return
+			case <-trigger:
+			case <-time.After(time.Duration(cfg.CollectSuccessIntervalSec) * time.Second):
+			}
+			continue
+		}
+		ok := eg.Collect(ctx, need)
 		select {
 		case <-trigger: // drop a stale trigger queued during collection
 		default:
@@ -597,9 +620,9 @@ func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trig
 		wait := time.Duration(cfg.CollectRetryIntervalSec) * time.Second
 		if ok {
 			wait = time.Duration(cfg.CollectSuccessIntervalSec) * time.Second
-			log.Printf("turn-state collected; next collection in %s", wait)
+			log.Printf("turn-state for %s collected; next collection in %s", need, wait)
 		} else {
-			log.Printf("no turn-state this round; retrying in %s", wait)
+			log.Printf("no turn-state for %s this round; retrying in %s", need, wait)
 		}
 		select {
 		case <-ctx.Done():

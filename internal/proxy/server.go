@@ -149,22 +149,25 @@ func (s *Server) StateSnapshot() []turnstate.Entry {
 	return s.state.Snapshot()
 }
 
-// HasValidStateForProbe reports whether a usable (target-length) turn-state is
-// already cached for the collection model, so collection can be skipped.
-func (s *Server) HasValidStateForProbe() bool {
+// HasValidState reports whether a usable turn-state is cached for model.
+func (s *Server) HasValidState(model string) bool {
 	if s.state == nil {
 		return false
 	}
-	model := s.models.Canonical(s.cfg.ProbeModel)
-	if model == "" {
+	m := s.models.Canonical(model)
+	if m == "" {
 		return false
 	}
 	s.authMu.Lock()
 	account := s.account
 	s.authMu.Unlock()
-	_, ok := s.state.Get(account, model)
+	_, ok := s.state.Get(account, m)
 	return ok
 }
+
+// HasValidStateForProbe reports whether a usable (target-length) turn-state is
+// already cached for the collection model, so collection can be skipped.
+func (s *Server) HasValidStateForProbe() bool { return s.HasValidState(s.cfg.ProbeModel) }
 
 // HasAuth reports whether account credentials have been observed yet. Collection
 // must not start before a real request supplies them.
@@ -178,13 +181,14 @@ func (s *Server) HasAuth() bool {
 // the account auth captured from real traffic; without it, it just checks
 // reachability (length 0). When a value of an accepted length is returned it is
 // cached (bound to the current node) for later injection.
-func (s *Server) Probe(ctx context.Context, client *http.Client) (int, bool, string, error) {
+func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel string) (int, bool, string, error) {
 	s.authMu.Lock()
 	auth, account := s.auth, s.account
 	s.authMu.Unlock()
-	// Collection always probes the configured model, not whatever auxiliary
-	// model the client happened to call last.
-	model := s.models.Canonical(s.cfg.ProbeModel)
+	model := s.models.Canonical(probeModel)
+	if model == "" {
+		model = s.models.Canonical(s.cfg.ProbeModel)
+	}
 	if model == "" {
 		model = s.cfg.ProbeModel
 	}

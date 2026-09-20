@@ -35,7 +35,7 @@ type Egress struct {
 // ProbeFunc performs one collection attempt through the current node and
 // reports the state length observed, whether the node was reachable at all,
 // and the raw state value when it matched the target length.
-type ProbeFunc func(ctx context.Context, client *http.Client) (length int, reachable bool, value string, err error)
+type ProbeFunc func(ctx context.Context, client *http.Client, model string) (length int, reachable bool, value string, err error)
 
 // SetProbe installs a collection probe (typically authenticated). When nil, a
 // plain unauthenticated reachability probe is used.
@@ -244,7 +244,7 @@ func (e *Egress) Counts() (int, int, int, int, int) { return e.p.Counts() }
 // as one returns an accepted length (e.g. 292). It never probes all nodes at
 // once, to avoid triggering upstream risk-control. The probe caches the value,
 // bound to the node that produced it. Returns true on success.
-func (e *Egress) Collect(ctx context.Context) bool {
+func (e *Egress) Collect(ctx context.Context, model string) bool {
 	e.mu.Lock()
 	if e.collecting {
 		e.mu.Unlock()
@@ -294,7 +294,7 @@ func (e *Egress) Collect(ctx context.Context) bool {
 		if err := e.m.Select(ctx, CollectGroup, name); err != nil {
 			continue
 		}
-		length, reachable, _, err := probe(ctx, client)
+		length, reachable, _, err := probe(ctx, client, model)
 		tried++
 		e.mu.Lock()
 		e.collectTried = tried
@@ -374,7 +374,7 @@ func (e *Egress) CollectProgress() (int, int) {
 }
 
 // reachabilityProbe is the unauthenticated fallback probe.
-func (e *Egress) reachabilityProbe(ctx context.Context, client *http.Client) (int, bool, string, error) {
+func (e *Egress) reachabilityProbe(ctx context.Context, client *http.Client, model string) (int, bool, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.m.cfg.HealthURL, nil)
 	if err != nil {
 		return 0, false, "", err

@@ -139,7 +139,7 @@ func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
 	if p.Trigger != nil {
 		p.Trigger()
 	} else {
-		go p.Eg.Collect(context.Background())
+		go p.Eg.Collect(context.Background(), p.ProbeModel)
 	}
 	writeJSON(w, map[string]any{"started": true})
 }

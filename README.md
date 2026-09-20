@@ -1,6 +1,7 @@
 # ccodex-rotate
 
 本地 Codex 反向代理：自动轮换代理节点、自动获取并注入 turn-state 凭据（个人 292 / Team 332）。
+会为**主模型与审查模型（codex-auto-review）**分别采集，且**优先从已知能出凭据的节点开始**。
 **不修改系统代理，不影响你本地的 Clash。**
 
 支持 macOS 与 Windows，包内已内置 mihomo 内核，解压即用。

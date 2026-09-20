@@ -21,7 +21,7 @@
   "max_probes_per_collect": 0,
   "collect_on_start": true,
   "auto_collect": true,
-  "collect_models": [],
+  "collect_models": ["codex-auto-review"],
   "collect_success_interval_seconds": 1800,
   "collect_retry_interval_seconds": 300,
   "selection": "auto",

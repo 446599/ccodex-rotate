@@ -68,8 +68,8 @@ type Config struct {
 	// AutoCollect starts collection automatically when a target-model request
 	// arrives (i.e. after you send a message). Default true.
 	AutoCollect bool `json:"auto_collect"`
-	// CollectModels limits on-demand collection to these models (canonical
-	// names). Empty means only ProbeModel. Other auxiliary models won't trigger.
+	// CollectModels are additional models to collect a turn-state for, on top of
+	// ProbeModel. Default includes Codex's review model.
 	CollectModels []string `json:"collect_models"`
 	// CollectSuccessIntervalSec is the delay after a successful collection.
 	CollectSuccessIntervalSec int `json:"collect_success_interval_seconds"`
@@ -128,6 +128,7 @@ func Default() Config {
 		TestIntervalSec:           60,
 		ProbeEnabled:              true,
 		ProbeModel:                "gpt-6-astra",
+		CollectModels:             []string{"codex-auto-review"},
 		ProbeTimeoutSec:           12,
 		MaxProbesPerCollect:       0,
 		CollectOnStart:            true,
