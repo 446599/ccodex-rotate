@@ -15,6 +15,7 @@ type Entry struct {
 	Node    string    `json:"node"`
 	Model   string    `json:"model"`
 	Account string    `json:"account"`
+	Source  string    `json:"source"` // "traffic" (real session) or "probe"
 	Length  int       `json:"length"`
 	Created time.Time `json:"created"`
 	Hits    int       `json:"hits"`
@@ -52,18 +53,25 @@ func (s *Store) Get(account, model string) (*Entry, bool) {
 	return e, true
 }
 
-// Put stores a freshly observed value for account+model on node.
-func (s *Store) Put(account, model, node, value string) {
+// Put stores a freshly observed value for account+model on node. A state learned
+// from the live session ("traffic") is never replaced by a probe-derived one, so
+// background collection cannot break an ongoing session.
+func (s *Store) Put(account, model, node, value, source string) {
 	if value == "" || model == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[key(account, model)] = &Entry{
+	k := key(account, model)
+	if old, ok := s.entries[k]; ok && old.Source == "traffic" && source == "probe" {
+		return
+	}
+	s.entries[k] = &Entry{
 		Value:   value,
 		Node:    node,
 		Model:   model,
 		Account: account,
+		Source:  source,
 		Length:  len(value),
 		Created: time.Now(),
 	}
