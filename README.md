@@ -1,28 +1,15 @@
 # ccodex-rotate
 
-本地 Codex 反向代理：**代理节点池轮换 + 惰性健康切换 + 按模型采集/注入 292 turn-state**。
+本地 Codex 反向代理：自动轮换代理节点、自动获取并注入 turn-state 凭据（个人 292 / Team 332）。
+**不修改系统代理，不影响你本地的 Clash。**
 
-它在本机启动一个私有 mihomo 内核和一个反向代理，把 Codex 的请求经健康节点转发到 `chatgpt.com`，并按需采集 `X-Codex-Turn-State`（**个人账号 292，Team/Business 332**）再注入后续请求。全程**不修改系统代理、不影响你本地的 Clash**。
-
-支持 macOS 与 Windows。
-
----
-
-## 功能
-
-- **节点轮换 / 故障切换**：订阅或自定义节点组成出口池，失败的节点进入冷却、自动跳过。
-- **按需采集 292 / 332**：默认在收到目标模型请求后自动采集；**逐个节点串行探测、采到即停**，成功 30 分钟后再刷新，失败 5 分钟后再试。
-- **同节点 / 跨节点注入**：采到的 292 绑定来源节点；默认允许跨节点注入。
-- **模型名归一**：`gpt-5.4-high`、`gpt-5.4` 视为同一模型，避免采错/注错。
-- **面板 + 命令行**：可视化节点质量、凭据、最近请求；支持订阅与自定义节点链接。
-- **手动转发出口**：面板点节点「用于转发」可固定转发出口；**只影响消息转发，采集凭据仍自动轮询**，两者互不影响。
-- **安全**：不触碰系统代理与本地 Clash；`serve` 退出时自动还原 Codex 配置。
+支持 macOS 与 Windows，包内已内置 mihomo 内核，解压即用。
 
 ---
 
-## 下载与安装
+## 1. 下载
 
-到 [Releases](https://github.com/446599/ccodex-rotate/releases) 下载对应平台压缩包：
+到 [Releases](https://github.com/446599/ccodex-rotate/releases) 下载对应平台压缩包，解压：
 
 | 平台 | 文件 |
 | --- | --- |
@@ -31,137 +18,59 @@
 | Windows x64 | `ccodex-rotate-*-windows-amd64.zip` |
 | Windows ARM | `ccodex-rotate-*-windows-arm64.zip` |
 
-解压后目录包含：可执行文件、启动脚本、`config.example.json`。
+## 2. 启动
 
-### 前置条件
+- **macOS**：双击 `start.command`
+- **Windows**：双击 `start.cmd`
 
-**发布包已内置 mihomo 内核**（`mihomo.exe` / `mihomo`），解压即用，无需额外安装。
+启动后会弹出网页面板：**http://127.0.0.1:17850/panel**
 
-如果你用的是从源码构建的版本、或想自行指定内核：
+> 首次没有节点也能启动，面板会引导你导入。
 
-1. 已安装 Clash Verge / Mihomo Party 等，工具会自动探测其内核路径；
-2. 自动下载内核：
+## 3. 导入节点
 
-   ```sh
-   ccodex-rotate fetch-core     # macOS/Linux
-   ccodex-rotate.exe fetch-core # Windows
-   ```
+在面板「**订阅与节点**」里：
 
-3. 已有内核，手动指定：
+- 「订阅链接」框粘贴订阅地址 → 点「**添加订阅**」
+- 或在「自定义节点链接」框粘贴节点分享链接（`ss://` / `vmess://` / `vless://` / `trojan://` / `hysteria2://` 等）→ 点「**添加节点**」
 
-   ```sh
-   ccodex-rotate core "/path/to/mihomo"             # macOS/Linux
-   ccodex-rotate.exe core "C:\path\to\mihomo.exe"   # Windows
-   ```
+添加后即时生效，稍等片刻「节点」列表就会出现，面板会显示可用节点数量。
 
----
+## 4. Codex 发消息
 
-## 快速开始
+1. 重启 Codex（ChatGPT 应用），新建会话
+2. 随便发一条消息
+3. 之后它会**自动采集 292 / 332 凭据并注入**，你正常用即可
 
-### macOS
-
-1. 解压后双击 `start.command`（或终端 `./start.command`）。
-2. 首次会提示配置订阅：
-
-   ```sh
-   ./ccodex-rotate sub add "https://你的订阅链接"
-   ```
-
-3. 重新运行 `./start.command`，看到 `codex wired ...` 即接入成功。
-4. 重启 Codex，新建会话，发一条消息。
-
-### Windows
-
-1. 解压后双击 `start.cmd`。
-2. 首次提示配置订阅：
-
-   ```bat
-   ccodex-rotate.exe sub add "https://你的订阅链接"
-   ```
-
-3. 重新双击 `start.cmd`。
-4. 重启 Codex，新建会话，发一条消息。
-
-### 网页面板
-
-启动后打开：**http://127.0.0.1:17850/panel**
-
-- 概览：当前出口、节点质量、请求/错误、上次/下次采集
-- **订阅与节点**：粘贴订阅链接或节点分享链接（`ss://`、`vmess://`、`vless://`、`trojan://`、`hysteria2://`、`http(s)://`、`socks5://`），保存即时生效
-- 已采集凭据：模型 / 长度 / 来源节点 / 已注入次数
-- 节点表、最近请求
-- 按钮：**立即采集 292**、换一个节点、恢复自动
+面板「已采集凭据」里能看到：模型、长度、来源节点、已注入次数。
 
 ---
 
-## 命令行
+## 常用操作（面板）
+
+- **换一个节点**：临时换转发出口
+- **用于转发**：固定某个节点作为转发出口（只影响消息转发；采集凭据仍自动轮询，不受影响）
+- **恢复自动**：解除固定，回到自动
+- **立即采集 292**：手动触发一次采集
+
+## 常见问题
+
+- **面板打不开**：确认启动窗口还开着；地址是 http://127.0.0.1:17850/panel
+- **提示找不到内核**：发布包已内置 `mihomo`/`mihomo.exe`；若自行构建，运行 `ccodex-rotate fetch-core` 或 `ccodex-rotate core <路径>`
+- **一直没采到凭据**：当前出口可能给的是非目标长度，它会每 5 分钟自动重试；也可在面板换节点后再点「立即采集 292」
+- **想退出**：在启动窗口按 Ctrl+C，会自动还原 Codex 配置
+
+---
+
+## 从源码构建（可选）
 
 ```sh
-ccodex-rotate init                     # 创建默认配置
-ccodex-rotate sub add <url...>         # 添加订阅
-ccodex-rotate sub list / rm / clear    # 查看/删除/清空订阅
-ccodex-rotate node add <link...>       # 添加自定义节点分享链接
-ccodex-rotate node list / clear
-ccodex-rotate proxy add <uri...>       # 添加 http/https/socks5 代理
-ccodex-rotate serve                    # 启动（代理 + 面板），Ctrl+C 停止并还原
-ccodex-rotate collect                  # 立即采集一次（逐个节点，采到即停）
-ccodex-rotate status                   # 查看运行状态
-ccodex-rotate nodes                    # 查看节点与健康
-ccodex-rotate check                    # 校验配置
-ccodex-rotate restore                  # 还原 Codex 配置
-ccodex-rotate paths                    # 显示配置/数据/Codex 路径
+./build.sh      # macOS/Linux，产物在 dist/
+build.bat       # Windows
 ```
 
-常用参数：`--config PATH`、`--codex-home PATH`。
+## 说明
 
----
-
-## 配置
-
-配置文件默认在：
-
-- macOS：`~/.ccodex-rotate/config.json`
-- Windows：`%USERPROFILE%\.ccodex-rotate\config.json`
-
-可用 `config.example.json` 作模板。关键项：
-
-| 项 | 说明 |
-| --- | --- |
-| `subscriptions` / `nodes` / `proxies` | 出口来源（订阅 / 节点分享链接 / 显式代理） |
-| `listen` | 本地反向代理地址（默认 `127.0.0.1:17850`） |
-| `mixed_port` / `collect_port` / `controller_port` | 私有 mihomo 端口：转发 `17890`、采集 `17892`、控制 `17891` |
-| `mihomo_path` | 手动指定 mihomo 内核路径（留空自动探测） |
-| `probe_model` | 采集 292 用的模型（默认 `gpt-6-astra`） |
-| `state_lengths` | 目标凭据长度：个人 `292`，Team `332`（默认 `[292, 332]`） |
-| `auto_collect` | 收到目标模型请求时自动采集（默认 `true`；改 `false` 则仅手动触发） |
-| `collect_success_interval_seconds` | 采到后多久再刷新（默认 1800） |
-| `collect_retry_interval_seconds` | 采不到多久重试（默认 300） |
-| `model_aliases` | 自定义模型名归一映射 |
-
----
-
-## 从源码构建
-
-需要 Go 1.26+。
-
-```sh
-./build.sh          # macOS/Linux：输出到 dist/
-build.bat           # Windows：双击运行（调用 build.ps1）
-```
-
-会生成 `darwin-arm64`、`darwin-amd64`、`windows-amd64`、`windows-arm64` 四个平台二进制。
-
-运行测试：
-
-```sh
-go test ./...
-```
-
----
-
-## 说明与边界
-
-- 不修改系统代理、DNS、TUN，也不停止任何本地程序；使用独立的私有 mihomo 与端口。
-- `serve` 会把 `~/.codex/config.toml` 指向本地代理，退出时自动还原（备份为 `config.toml.ccodex-rotate.bak`）。
-- 采集会消耗少量账号额度；`state_lengths` 只接受目标长度，非目标长度不会被缓存或注入。
-- 292（个人）/ 332（Team）属于社区经验形状，不是 OpenAI 官方指标；能否采到取决于账号与出口。
+- 采集会消耗少量账号额度；凭据按模型缓存，采到即停，30 分钟后刷新。
+- 292（个人）/ 332（Team）为社区经验形状，能否采到取决于账号与出口。
+- 本工具与 OpenAI、Mihomo 无隶属关系；包内 mihomo 内核来自 MetaCubeX/mihomo，见 `LICENSE.mihomo`。
