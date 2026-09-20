@@ -1,0 +1,7 @@
+/dist/
+/release/
+/ccodex-rotate
+*.exe
+*.test
+*.out
+.DS_Store
