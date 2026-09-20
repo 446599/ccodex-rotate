@@ -96,6 +96,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"recent":           recent,
 		"collect_log":      p.Eg.CollectLog(),
 		"states":           p.Proxy.StateSnapshot(),
+		"state_ttl":        p.Proxy.StateTTLSeconds(),
 		"mihomo_error":     errString(p.Mgr.Err()),
 	}
 	if p.SourcesCounts != nil {
@@ -365,6 +366,9 @@ async function use(name){await fetch('/api/pin',{method:'POST',headers:{'Content
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function ts(v){if(!v||v.indexOf('0001')===0)return '—';return new Date(v).toLocaleString();}
 function ago(v){if(!v||v.indexOf('0001')===0)return '';var s=Math.floor((Date.now()-new Date(v))/1000);if(s<60)return s+'秒前';if(s<3600)return Math.floor(s/60)+'分前';return Math.floor(s/3600)+'时前';}
+function fmtLeft(ms){if(isNaN(ms))return '—';if(ms<=0)return '已过期';var s=Math.floor(ms/1000);var h=Math.floor(s/3600);var m=Math.floor((s%3600)/60);var sec=s%60;function p(n){return (n<10?'0':'')+n;}return (h>0?(h+':'):'')+p(m)+':'+p(sec);}
+function tick(){var now=Date.now();document.querySelectorAll('[data-exp]').forEach(function(el){el.textContent=fmtLeft(Number(el.dataset.exp)-now);});document.querySelectorAll('[data-next]').forEach(function(el){el.textContent=fmtLeft(Number(el.dataset.next)-now);});}
+setInterval(tick,1000);
 var stateLabel={ok:'可用',reachable:'无法获取',unknown:'未测',failed:'失败'};
 var stateDot={ok:'ok',reachable:'warn',unknown:'unk',failed:'bad'};
 async function refresh(){
@@ -378,7 +382,10 @@ async function refresh(){
   else if(s.last_collect&&s.last_collect.indexOf('0001')!==0)
     sc=ts(s.last_collect)+' · '+(s.last_collect_ok?'成功（已注入）':'未采到')+' '+ago(s.last_collect);
   document.getElementById('scan').textContent=sc;
-  document.getElementById('next').textContent=s.collecting?'采集中…':ts(s.next_collect);
+  var nx=document.getElementById('next');
+  if(s.collecting){nx.textContent='采集中…';nx.removeAttribute('data-next');}
+  else if(s.next_collect&&s.next_collect.indexOf('0001')!==0){nx.setAttribute('data-next',new Date(s.next_collect).getTime());}
+  else{nx.textContent='—';nx.removeAttribute('data-next');}
   window._inj=!!s.inject;
   var ib=document.getElementById('injBtn');
   if(ib){ib.textContent=s.inject?'已开启（点击关闭）':'已关闭（点击开启）';ib.style.borderColor=s.inject?'#2ecc71':'#e74c3c';}
@@ -398,9 +405,10 @@ async function refresh(){
   else if(!s.auth_ready) stMsg='尚未获得账号凭据：在 Codex 里发一条消息后会自动开始采集';
   else stMsg='尚无合格 292/332 凭据，正在按间隔重试'+(obs?('；'+obs):'');
   document.getElementById('states').innerHTML = st.length
-    ? '<table><tr><th>模型</th><th>长度</th><th>来源节点</th><th>采集时间</th><th>已注入</th></tr>'+
-      st.map(function(x){return '<tr><td>'+esc(x.model)+'</td><td><b>'+x.length+'</b> 字符</td><td>'+esc(x.node||'-')+'</td><td>'+ts(x.created)+' '+ago(x.created)+'</td><td>'+x.hits+'</td></tr>';}).join('')+'</table>'
+    ? '<table><tr><th>模型</th><th>长度</th><th>来源节点</th><th>采集时间</th><th>剩余有效期</th><th>已注入</th></tr>'+
+      st.map(function(x){var exp=new Date(x.created).getTime()+(Number(s.state_ttl)||3600)*1000;return '<tr><td>'+esc(x.model)+'</td><td><b>'+x.length+'</b> 字符</td><td>'+esc(x.node||'-')+'</td><td>'+ts(x.created)+' '+ago(x.created)+'</td><td data-exp="'+exp+'">—</td><td>'+x.hits+'</td></tr>';}).join('')+'</table>'
     : stMsg;
+  tick();
   var n=await (await fetch('/api/nodes')).json();
   var rows=(n.nodes||[]).map(function(x){
     var lb=stateLabel[x.state]||x.state;

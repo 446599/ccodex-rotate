@@ -143,6 +143,9 @@ func (s *Server) SetInjection(on bool) { s.inject.Store(on) }
 // InjectionEnabled reports whether credential injection is on.
 func (s *Server) InjectionEnabled() bool { return s.inject.Load() }
 
+// StateTTLSeconds is the credential validity window.
+func (s *Server) StateTTLSeconds() int { return s.cfg.StateTTLSeconds }
+
 // StateSnapshot returns the cached turn-state entries for the panel.
 func (s *Server) StateSnapshot() []turnstate.Entry {
 	if s.state == nil {
