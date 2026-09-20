@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>控制台 · ccodex-rotate</title>
+    <link rel="stylesheet" href="/panel/assets/panel.css" />
+    <script src="/panel/assets/panel.js" defer></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">跳到主要内容</a>
+    <header class="topbar">
+      <a class="brand" href="#overview"
+        ><span class="brand-mark" aria-hidden="true">↗</span>ccodex<span
+          class="brand-light"
+        >
+          / rotate</span
+        ></a
+      >
+      <div class="top-actions">
+        <span class="badge" id="connection">正在连接</span
+        ><button data-guide>使用教程 <span aria-hidden="true">↗</span></button>
+      </div>
+    </header>
+    <div class="shell">
+      <aside>
+        <div class="nav-label">工作空间</div>
+        <nav aria-label="控制台导航">
+          <a href="#overview">运行概览</a><a href="#credentials">凭据管理</a
+          ><a href="#sources">订阅与节点</a><a href="#activity">运行日志</a>
+        </nav>
+        <div class="sidebar-note">
+          <span class="dot"></span> 本地运行
+          <p>独立代理通道<br />不修改系统代理</p>
+          <code>{{.Listen}}</code>
+        </div>
+      </aside>
+      <main id="main">
+        <section id="overview">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">CONTROL CENTER</div>
+              <h1>让连接，一目了然。</h1>
+              <p class="muted">
+                管理转发出口、查看采集进度，其他交给自动轮换。
+              </p>
+            </div>
+            <span class="updated" id="updated">等待状态同步</span>
+          </div>
+          <div
+            id="connectionError"
+            class="notice error"
+            role="alert"
+            hidden
+          ></div>
+          <div id="setupHint" class="notice" hidden>
+            <div>
+              <strong>从添加第一个节点开始</strong>
+              <div>导入订阅或节点链接，然后在 Codex 中发送一条消息。</div>
+            </div>
+            <a class="button primary" href="#sources"
+              >添加订阅 <span aria-hidden="true">→</span></a
+            >
+          </div>
+          <div class="metrics">
+            <article class="metric">
+              <span>节点总数</span><strong id="total">—</strong
+              ><small id="quality">等待节点信息</small>
+            </article>
+            <article class="metric">
+              <span>已处理请求</span><strong id="requests">—</strong
+              ><small id="errors">等待请求信息</small>
+            </article>
+            <article class="metric">
+              <span>有效凭据</span><strong id="credentialCount">—</strong
+              ><small>按账号与模型分别缓存</small>
+            </article>
+          </div>
+          <div class="overview-grid">
+            <article class="card forward">
+              <div class="section-heading">
+                <h2>转发出口</h2>
+                <span class="badge" id="mode">自动选择</span>
+              </div>
+              <div class="node-name" id="node">正在读取…</div>
+              <p class="muted">
+                你的消息通过这个节点发送。固定出口不会改变采集通道。
+              </p>
+              <div class="actions">
+                <button
+                  id="rotateBtn"
+                  data-action="/api/rotate"
+                  class="primary"
+                >
+                  换一个节点</button
+                ><button data-action="/api/reset">恢复自动</button>
+              </div>
+              <div class="card-foot">
+                <span class="dot"></span> 转发与采集独立运行
+              </div>
+            </article>
+            <article class="card">
+              <div class="section-heading">
+                <h2>凭据采集</h2>
+                <span class="badge" id="collectBadge">等待中</span>
+              </div>
+              <p id="scan">等待采集状态…</p>
+              <div id="progWrap" hidden>
+                <div
+                  class="progress"
+                  role="progressbar"
+                  aria-label="节点采集进度"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow="0"
+                >
+                  <div id="prog"></div>
+                </div>
+                <small id="progText"></small>
+              </div>
+              <div class="detail-row">
+                <span class="muted">下次检查</span><span id="next">—</span>
+              </div>
+              <div class="actions">
+                <button id="collectBtn" data-action="/api/collect">
+                  立即采集</button
+                ><button
+                  id="stopBtn"
+                  class="danger"
+                  data-action="/api/collect/stop"
+                  hidden
+                >
+                  停止采集
+                </button>
+              </div>
+            </article>
+          </div>
+        </section>
+        <section id="credentials">
+          <div class="section-title">
+            <div>
+              <h2>凭据管理</h2>
+              <p class="muted">
+                采集成功后自动缓存，开启注入即可用于后续请求。
+              </p>
+            </div>
+            <button id="injBtn" aria-pressed="false" disabled>正在读取</button>
+          </div>
+          <div class="card">
+            <div
+              id="states"
+              class="table-wrap"
+              tabindex="0"
+              role="region"
+              aria-label="已采集凭据"
+            >
+              正在读取凭据…
+            </div>
+            <details>
+              <summary>采集配置与连接信息</summary>
+              <p id="cfg"></p>
+              <p>
+                本地地址 <code>{{.Listen}}</code> · 上游
+                <code>{{.Upstream}}</code>
+              </p>
+            </details>
+          </div>
+        </section>
+        <section id="sources">
+          <div class="section-title">
+            <div>
+              <h2>订阅与节点</h2>
+              <p class="muted">
+                添加后即时生效。支持订阅地址和常见节点分享链接。
+              </p>
+            </div>
+            <span class="badge" id="srcCounts">正在读取</span>
+          </div>
+          <div class="card import-grid">
+            <form data-source="sub">
+              <label for="subInput">订阅链接</label>
+              <p class="field-help" id="subHelp">
+                支持 Clash、Base64、URI 列表，每行一个地址。
+              </p>
+              <textarea
+                id="subInput"
+                rows="3"
+                aria-describedby="subHelp"
+                placeholder="https://example.com/subscribe"
+                required
+                spellcheck="false"
+                autocomplete="off"
+              ></textarea>
+              <div class="actions">
+                <button type="submit" class="primary">添加订阅</button
+                ><button type="button" class="quiet danger" data-clear="sub">
+                  清空订阅
+                </button>
+              </div>
+              <p class="form-result" id="subResult" role="status"></p>
+            </form>
+            <form data-source="node">
+              <label for="nodeInput">自定义节点</label>
+              <p class="field-help" id="nodeHelp">
+                支持 ss / vmess / vless / trojan / hysteria2 / http / socks5。
+              </p>
+              <textarea
+                id="nodeInput"
+                rows="3"
+                aria-describedby="nodeHelp"
+                placeholder="ss://… 或 vmess://… 每行一个"
+                required
+                spellcheck="false"
+                autocomplete="off"
+              ></textarea>
+              <div class="actions">
+                <button type="submit">添加节点</button
+                ><button type="button" class="quiet danger" data-clear="node">
+                  清空节点
+                </button>
+              </div>
+              <p class="form-result" id="nodeResult" role="status"></p>
+            </form>
+          </div>
+          <div class="card">
+            <div class="section-heading">
+              <h3>节点列表 <span id="nodeCount" class="count"></span></h3>
+              <label class="search"
+                ><span class="sr-only">搜索节点</span
+                ><input
+                  id="nodeSearch"
+                  type="search"
+                  placeholder="搜索节点名称或类型"
+              /></label>
+            </div>
+            <div
+              id="list"
+              class="table-wrap"
+              tabindex="0"
+              role="region"
+              aria-label="节点列表"
+            >
+              正在加载节点…
+            </div>
+          </div>
+        </section>
+        <section id="activity">
+          <div class="section-title">
+            <div>
+              <h2>运行日志</h2>
+              <p class="muted">查看最近的采集结果与消息转发记录。</p>
+            </div>
+          </div>
+          <div class="card">
+            <h3>凭据获取日志</h3>
+            <div
+              id="collectLog"
+              class="table-wrap log"
+              tabindex="0"
+              role="region"
+              aria-label="凭据获取日志"
+            ></div>
+          </div>
+          <div class="card">
+            <h3>会话日志</h3>
+            <div
+              id="recent"
+              class="table-wrap log"
+              tabindex="0"
+              role="region"
+              aria-label="会话日志"
+            ></div>
+          </div>
+        </section>
+        <footer>ccodex-rotate <span>本地控制台 · 每 3 秒同步状态</span></footer>
+      </main>
+    </div>
+    <dialog
+      id="guide"
+      aria-labelledby="guideTitle"
+      aria-describedby="guideText"
+    >
+      <div class="guide-top">
+        <span class="eyebrow">QUICK START</span
+        ><button id="guideClose" class="quiet" aria-label="关闭教程">
+          关闭
+        </button>
+      </div>
+      <div class="guide-visual" aria-hidden="true">
+        <span id="guideNumber">01</span>
+        <div class="guide-route">
+          <span>Codex</span><span>→</span><strong>rotate</strong><span>→</span
+          ><span>代理节点</span>
+        </div>
+      </div>
+      <div class="guide-body">
+        <div id="guideSteps" class="guide-steps" aria-label="教程进度"></div>
+        <h2 id="guideTitle"></h2>
+        <p id="guideText"></p>
+        <div id="guideTip" class="guide-tip"></div>
+        <div class="guide-actions">
+          <button id="guideBack">上一步</button
+          ><button id="guideNext" class="primary">下一步</button>
+        </div>
+        <p class="guide-note">随时可以通过右上角「使用教程」再次查看。</p>
+      </div>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>
