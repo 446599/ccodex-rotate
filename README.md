@@ -34,7 +34,9 @@
 
 ### 前置条件
 
-需要一个可用的 **mihomo / Clash.Meta 内核**（本工具不内置）。三种方式任选：
+**发布包已内置 mihomo 内核**（`mihomo.exe` / `mihomo`），解压即用，无需额外安装。
+
+如果你用的是从源码构建的版本、或想自行指定内核：
 
 1. 已安装 Clash Verge / Mihomo Party 等，工具会自动探测其内核路径；
 2. 自动下载内核：
@@ -47,8 +49,8 @@
 3. 已有内核，手动指定：
 
    ```sh
-   ccodex-rotate core "/path/to/mihomo"        # macOS/Linux
-   ccodex-rotate.exe core "C:\path\to\mihomo.exe"  # Windows
+   ccodex-rotate core "/path/to/mihomo"             # macOS/Linux
+   ccodex-rotate.exe core "C:\path\to\mihomo.exe"   # Windows
    ```
 
 ---

@@ -1,0 +1,7 @@
+Bundled third-party component: mihomo (Clash.Meta)
+Source: https://github.com/MetaCubeX/mihomo
+Version: v1.19.31
+License: see LICENSE.mihomo (included in this package)
+
+The bundled mihomo binary is used as the local proxy core. It is unmodified.
+ccodex-rotate itself does not include or redistribute any proxy subscription.
