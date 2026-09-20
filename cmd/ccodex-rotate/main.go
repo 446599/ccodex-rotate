@@ -31,7 +31,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.3.3"
+const version = "0.3.4"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -522,7 +522,8 @@ func runCheck(cfgPath string) {
 	log.Printf("health url: %s (expected %s)", cfg.HealthURL, cfg.HealthExpected)
 	log.Printf("listen %s -> upstream %s via mixed :%d", cfg.Listen, cfg.UpstreamBase, cfg.MixedPort)
 	cfgFile := codexcfg.Path(cfg.CodexHome)
-	if codexcfg.IsWired(cfgFile, cfg.Listen) {
+	base := "http://" + cfg.Listen + "/backend-api/codex"
+	if codexcfg.IsWired(cfgFile, base) {
 		log.Printf("codex config points at this proxy: %s", cfgFile)
 	} else {
 		log.Printf("codex config not wired yet (is served only while `serve` runs)")
