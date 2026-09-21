@@ -51,6 +51,8 @@ func (e *simEgress) Rotate(ctx context.Context, reason string) (string, bool) {
 
 func (e *simEgress) Success() {}
 
+func (e *simEgress) Outcome(requested, served string) {}
+
 func (e *simEgress) Pin(ctx context.Context, name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

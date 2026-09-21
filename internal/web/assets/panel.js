@@ -227,7 +227,8 @@ function renderStatus(s) {
     ? table(
         [
           "时间",
-          "模型",
+          "请求模型",
+          "实际模型",
           "状态",
           "转发节点",
           "注入",
@@ -242,6 +243,14 @@ function renderStatus(s) {
               esc(new Date(x.time).toLocaleTimeString()) +
               "</td><td>" +
               esc(x.model || "—") +
+              "</td><td>" +
+              (x.served_model
+                ? '<span class="badge ' +
+                  (x.model && x.served_model !== x.model ? "bad" : "good") +
+                  '">' +
+                  esc(x.served_model) +
+                  "</span>"
+                : "—") +
               '</td><td><span class="badge ' +
               (x.status >= 400 ? "bad" : "good") +
               '">' +
@@ -325,6 +334,11 @@ function renderNodes() {
             esc(x.type || "—") +
             "</td><td>" +
             esc(labels[x.state] || x.state) +
+            (x.degraded
+              ? ' <span class="badge bad">降智</span>'
+              : x.alive
+                ? ' <span class="badge good">不降智</span>'
+                : "") +
             "</td><td>" +
             (x.alive && x.delay > 0 ? esc(x.delay) + " ms" : "—") +
             '</td><td><button data-pin="' +

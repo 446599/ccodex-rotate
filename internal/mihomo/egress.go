@@ -66,7 +66,7 @@ func (e *Egress) CollectLog() []CollectEvent {
 // ProbeFunc performs one collection attempt through the current node and
 // reports the state length observed, whether the node was reachable at all,
 // and the raw state value when it matched the target length.
-type ProbeFunc func(ctx context.Context, client *http.Client, model string) (length int, reachable bool, value string, err error)
+type ProbeFunc func(ctx context.Context, client *http.Client, model string) (length int, reachable bool, value, served string, err error)
 
 // SetProbe installs a collection probe (typically authenticated). When nil, a
 // plain unauthenticated reachability probe is used.
@@ -157,19 +157,33 @@ func (e *Egress) Current() string {
 	return e.current
 }
 
-// pickLocked chooses and selects a node.
-func (e *Egress) pickLocked(ctx context.Context, exclude, reason string) (string, bool) {
+// pick chooses and selects a node. The state lock is only held while reading
+// pool state; the controller call happens WITHOUT the lock so a slow mihomo
+// can never wedge the panel or collection.
+func (e *Egress) pick(ctx context.Context, exclude, reason string) (string, bool) {
 	if exclude != "" && reason != "" {
 		e.p.MarkFail(exclude, reason)
 	}
+	e.mu.Lock()
+	if e.manual {
+		cur := e.current
+		e.mu.Unlock()
+		return cur, false
+	}
+	cur := e.current
 	name, ok := e.p.Next(exclude)
-	if !ok {
-		return e.current, false
+	e.mu.Unlock()
+	if !ok || name == cur {
+		return cur, false
 	}
-	if err := e.m.Select(ctx, MainGroup, name); err != nil {
-		return e.current, false
+	sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := e.m.Select(sctx, MainGroup, name); err != nil {
+		return cur, false
 	}
+	e.mu.Lock()
 	e.current = name
+	e.mu.Unlock()
 	return name, true
 }
 
@@ -178,10 +192,8 @@ func (e *Egress) Init(ctx context.Context) error {
 	if err := e.RefreshNodes(ctx); err != nil {
 		return err
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.current == "" {
-		e.pickLocked(ctx, "", "")
+	if e.Current() == "" {
+		e.pick(ctx, "", "")
 	}
 	return nil
 }
@@ -190,56 +202,52 @@ func (e *Egress) Init(ctx context.Context) error {
 // When the forwarding exit is manually pinned, rotation is disabled (the pin is
 // respected); collection is unaffected either way.
 func (e *Egress) Rotate(ctx context.Context, reason string) (string, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.manual {
-		return e.current, false
+	if e.Manual() != "" {
+		return e.Current(), false
 	}
-	cur := e.current
-	return e.pickLocked(ctx, cur, reason)
+	return e.pick(ctx, e.Current(), reason)
 }
 
 // Success records the current node as working.
 func (e *Egress) Success() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.p.MarkOK(e.current, 0)
+	e.p.MarkOK(e.Current(), 0)
 }
 
 // EnsureHealthy switches away when the current node is known-failed.
 func (e *Egress) EnsureHealthy(ctx context.Context) (string, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.manual {
-		return e.current, false
+	if e.Manual() != "" {
+		return e.Current(), false
 	}
-	var curState string
+	cur := e.Current()
+	curState := ""
 	for _, e2 := range e.p.Snapshot() {
-		if e2.Name == e.current {
+		if e2.Name == cur {
 			curState = e2.State
 			break
 		}
 	}
-	if e.current != "" && curState != pool.Failed {
-		return e.current, false
+	if cur != "" && curState != pool.Failed {
+		return cur, false
 	}
-	name, changed := e.pickLocked(ctx, e.current, "")
-	return name, changed
+	return e.pick(ctx, cur, "")
 }
 
 // Reset returns the selector to the fastest member of the AUTO group.
 func (e *Egress) Reset(ctx context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.m.Select(ctx, MainGroup, AutoGroup); err != nil {
+	sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := e.m.Select(sctx, MainGroup, AutoGroup); err != nil {
 		return err
 	}
+	e.mu.Lock()
 	e.manual = false
 	e.current = ""
-	proxies, err := e.m.Proxies(ctx)
-	if err == nil {
+	e.mu.Unlock()
+	if proxies, err := e.m.Proxies(sctx); err == nil {
 		if a, ok := proxies[AutoGroup]; ok {
+			e.mu.Lock()
 			e.current = a.Now
+			e.mu.Unlock()
 		}
 	}
 	return nil
@@ -252,13 +260,15 @@ func (e *Egress) PinUser(ctx context.Context, name string) error {
 
 // Pin binds the forwarding exit to name and marks it manual.
 func (e *Egress) Pin(ctx context.Context, name string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := e.m.Select(ctx, MainGroup, name); err != nil {
+	sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := e.m.Select(sctx, MainGroup, name); err != nil {
 		return err
 	}
+	e.mu.Lock()
 	e.current = name
 	e.manual = true
+	e.mu.Unlock()
 	return nil
 }
 
@@ -351,7 +361,7 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		if err := e.m.Select(ctx, CollectGroup, name); err != nil {
 			continue
 		}
-		length, reachable, _, err := probe(ctx, client, model)
+		length, reachable, _, served, err := probe(ctx, client, model)
 		tried++
 		e.mu.Lock()
 		e.collectTried = tried
@@ -360,6 +370,14 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 			e.lastSeenModel = model
 		}
 		e.mu.Unlock()
+		// A node is "clean" only if the upstream served the requested model.
+		if served != "" {
+			if s := e.m.cfg.ProbeModel; served != model && served != s {
+				e.p.MarkDegraded(name)
+			} else if served == model {
+				e.p.MarkClean(name)
+			}
+		}
 		switch {
 		case err == nil && length > 0 && (len(targets) == 0 || targets[length]):
 			e.p.MarkOK(name, 0)
@@ -460,22 +478,52 @@ func (e *Egress) LastSeen() (string, int) {
 }
 
 // reachabilityProbe is the unauthenticated fallback probe.
-func (e *Egress) reachabilityProbe(ctx context.Context, client *http.Client, model string) (int, bool, string, error) {
+func (e *Egress) reachabilityProbe(ctx context.Context, client *http.Client, model string) (int, bool, string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.m.cfg.HealthURL, nil)
 	if err != nil {
-		return 0, false, "", err
+		return 0, false, "", "", err
 	}
 	req.Header.Set("User-Agent", "ccodex-rotate/"+versionish)
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, false, "", err
+		return 0, false, "", "", err
 	}
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<14))
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
-		return 0, false, "", nil
+		return 0, false, "", "", nil
 	}
-	return 0, true, "", nil
+	return 0, true, "", "", nil
+}
+
+// Outcome records whether the current node served the requested model, and
+// switches away automatically when it is degraded.
+func (e *Egress) Outcome(requested, served string) {
+	if served == "" || requested == "" {
+		return
+	}
+	cur := e.Current()
+	if served == requested {
+		e.p.MarkClean(cur)
+		return
+	}
+	// Degraded: mark and switch to a clean node (unless manually pinned).
+	e.p.MarkDegraded(cur)
+	if e.Manual() != "" {
+		return
+	}
+	name, ok := e.p.Next(cur)
+	if !ok || name == cur {
+		return
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := e.m.Select(sctx, MainGroup, name); err == nil {
+		e.mu.Lock()
+		e.current = name
+		e.mu.Unlock()
+		e.logEvent(requested, fmt.Sprintf("降智：%s 实际返回 %s，已换到 %s", cur, served, name))
+	}
 }
 
 const versionish = "0.1"

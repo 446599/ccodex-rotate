@@ -126,12 +126,13 @@ func (p *Panel) nodes(w http.ResponseWriter, r *http.Request) {
 	for _, e := range entries {
 		alive := e.State != "failed"
 		nodes = append(nodes, map[string]any{
-			"name":   e.Name,
-			"type":   typeByName[e.Name],
-			"delay":  e.Delay,
-			"alive":  alive,
-			"state":  e.State,
-			"reason": e.Reason,
+			"name":     e.Name,
+			"type":     typeByName[e.Name],
+			"delay":    e.Delay,
+			"alive":    alive,
+			"state":    e.State,
+			"degraded": e.Degraded,
+			"reason":   e.Reason,
 		})
 	}
 	writeJSON(w, map[string]any{"current": p.Eg.Current(), "nodes": nodes})

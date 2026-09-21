@@ -33,21 +33,42 @@ type Egress interface {
 	Rotate(ctx context.Context, reason string) (string, bool)
 	// Success records that the current node worked.
 	Success()
+	// Outcome records whether the current node served the requested model.
+	Outcome(requested, served string)
 	// Pin binds the current node to name (used to keep turn-state on one exit).
 	Pin(ctx context.Context, name string) error
 }
 
 // Record is one handled request, kept for the panel.
 type Record struct {
-	Time     time.Time `json:"time"`
-	Method   string    `json:"method"`
-	Path     string    `json:"path"`
-	Status   int       `json:"status"`
-	Node     string    `json:"node"`
-	Model    string    `json:"model,omitempty"`
-	Injected bool      `json:"injected"`
-	Attempts int       `json:"attempts"`
-	Millis   int64     `json:"millis"`
+	Time        time.Time `json:"time"`
+	Method      string    `json:"method"`
+	Path        string    `json:"path"`
+	Status      int       `json:"status"`
+	Node        string    `json:"node"`
+	Model       string    `json:"model,omitempty"`
+	ServedModel string    `json:"served_model,omitempty"`
+	Quota       string    `json:"quota,omitempty"`
+	Injected    bool      `json:"injected"`
+	Attempts    int       `json:"attempts"`
+	Millis      int64     `json:"millis"`
+}
+
+// prefixCapture keeps the first N bytes written through it.
+type prefixCapture struct {
+	buf   []byte
+	limit int
+}
+
+func (p *prefixCapture) Write(b []byte) (int, error) {
+	if room := p.limit - len(p.buf); room > 0 {
+		if len(b) <= room {
+			p.buf = append(p.buf, b...)
+		} else {
+			p.buf = append(p.buf, b[:room]...)
+		}
+	}
+	return len(b), nil
 }
 
 // Server is the local reverse proxy.
@@ -197,7 +218,7 @@ func (s *Server) HasAuth() bool {
 // the account auth captured from real traffic; without it, it just checks
 // reachability (length 0). When a value of an accepted length is returned it is
 // cached (bound to the current node) for later injection.
-func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel string) (int, bool, string, error) {
+func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel string) (int, bool, string, string, error) {
 	s.authMu.Lock()
 	auth, account := s.auth, s.account
 	s.authMu.Unlock()
@@ -212,26 +233,26 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 	if auth == "" {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.HealthURL, nil)
 		if err != nil {
-			return 0, false, "", err
+			return 0, false, "", "", err
 		}
 		req.Header.Set("User-Agent", "ccodex-rotate/probe")
 		resp, err := client.Do(req)
 		if err != nil {
-			return 0, false, "", err
+			return 0, false, "", "", err
 		}
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<14))
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
-			return 0, false, "", nil
+			return 0, false, "", "", nil
 		}
-		return 0, true, "", nil
+		return 0, true, "", "", nil
 	}
 
 	body := probeBody(model)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.cfg.UpstreamBase+"/backend-api/codex/responses", strings.NewReader(body))
 	if err != nil {
-		return 0, false, "", err
+		return 0, false, "", "", err
 	}
 	req.Header.Set("Authorization", auth)
 	if account != "" {
@@ -244,17 +265,18 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0")
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, false, "", err
+		return 0, false, "", "", err
 	}
 	value := resp.Header.Get("X-Codex-Turn-State")
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	prefix, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
+	served := extractModel(prefix)
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
-		return 0, false, "", nil
+		return 0, false, "", served, nil
 	}
 	if value == "" {
-		return 0, true, "", nil
+		return 0, true, "", served, nil
 	}
 	length := len(value)
 	if s.state != nil && s.lengthAllowed(length) {
@@ -264,7 +286,7 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 		}
 		s.state.Put(account, model, node, value)
 	}
-	return length, true, value, nil
+	return length, true, value, served, nil
 }
 
 func probeBody(model string) string {
@@ -431,12 +453,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		copyHeaders(w.Header(), resp.Header)
 		w.WriteHeader(resp.StatusCode)
 		s.eg.Success()
-		_, copyErr := copyStream(w, resp.Body)
+		cap := &prefixCapture{limit: 1 << 15}
+		_, copyErr := copyStream(w, io.TeeReader(resp.Body, cap))
 		resp.Body.Close()
+		served := extractModel(cap.buf)
+		// Learn whether this exit served the requested model (degradation), so
+		// the pool can prefer clean exits and switch away from degraded ones.
+		if r.Method == http.MethodPost {
+			s.eg.Outcome(model, served)
+		}
 		s.record(Record{
 			Time: time.Now(), Method: r.Method, Path: r.URL.Path,
 			Status: resp.StatusCode, Node: s.eg.Current(), Model: model,
-			Injected: injectedAny, Attempts: attempts,
+			ServedModel: served,
+			Quota:       resp.Header.Get("x-codex-primary-used-percent"),
+			Injected:    injectedAny, Attempts: attempts,
 			Millis: time.Since(start).Milliseconds(),
 		})
 		if copyErr != nil {

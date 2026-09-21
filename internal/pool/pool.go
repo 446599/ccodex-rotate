@@ -25,6 +25,7 @@ type Entry struct {
 	Name      string    `json:"name"`
 	Delay     int       `json:"delay"`
 	State     string    `json:"state"`
+	Degraded  bool      `json:"degraded"` // served a different model than requested
 	FailUntil time.Time `json:"fail_until"`
 	LastOK    time.Time `json:"last_ok"`
 	Reason    string    `json:"reason,omitempty"`
@@ -123,6 +124,30 @@ func (p *Pool) MarkOK(name string, delay int) {
 	p.saveLocked()
 }
 
+// MarkClean records that a node served the requested model (not degraded).
+func (p *Pool) MarkClean(name string) {
+	if name == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.ensure(name)
+	e.Degraded = false
+	p.saveLocked()
+}
+
+// MarkDegraded records that a node served a different model than requested.
+func (p *Pool) MarkDegraded(name string) {
+	if name == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e := p.ensure(name)
+	e.Degraded = true
+	p.saveLocked()
+}
+
 // MarkReachable records a node that answers but does not yield the target state.
 func (p *Pool) MarkReachable(name string) {
 	if name == "" {
@@ -202,7 +227,13 @@ func (p *Pool) Next(exclude string) (string, bool) {
 		}
 		return ""
 	}
+	if n := pick(func(e *Entry) bool { return e.State == OK && !e.Degraded }); n != "" {
+		return n, true
+	}
 	if n := pick(func(e *Entry) bool { return e.State == OK }); n != "" {
+		return n, true
+	}
+	if n := pick(func(e *Entry) bool { return e.State == Reachable && !e.Degraded && p.usable(e) }); n != "" {
 		return n, true
 	}
 	if n := pick(func(e *Entry) bool { return e.State == Reachable && p.usable(e) }); n != "" {
@@ -262,6 +293,9 @@ func (p *Pool) Counts() (int, int, int, int, int) {
 }
 
 func rank(e Entry) int {
+	if e.Degraded {
+		return 9
+	}
 	switch e.State {
 	case OK:
 		return 0
