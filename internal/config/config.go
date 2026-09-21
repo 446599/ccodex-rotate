@@ -98,6 +98,10 @@ type Config struct {
 	// ModelAliases maps a requested model name to its canonical name so
 	// turn-state keys, probing and injection agree on one identifier.
 	ModelAliases map[string]string `json:"model_aliases"`
+	// ForceModel, when set, rewrites every request body's "model" to this value
+	// before forwarding (e.g. force gpt-6-astra even if the client asks for
+	// another model such as gpt-5.6-luna).
+	ForceModel string `json:"force_model"`
 
 	// TimeoutSec is the per-attempt upstream timeout.
 	TimeoutSec int `json:"timeout_seconds"`

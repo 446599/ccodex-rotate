@@ -43,6 +43,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/collect/stop", p.collectStop)
 	mux.HandleFunc("/api/scan", p.collect)
 	mux.HandleFunc("/api/injection", p.injection)
+	mux.HandleFunc("/api/force-model", p.forceModel)
 	mux.HandleFunc("/api/sources/add", p.sourcesAdd)
 	mux.HandleFunc("/api/sources/clear", p.sourcesClear)
 	mux.HandleFunc("/api/pin", p.pin)
@@ -85,6 +86,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"last_seen_model":  seenModel,
 		"last_seen_len":    seenLen,
 		"inject":           p.Proxy.InjectionEnabled(),
+		"force_model":      p.Proxy.ForceModel(),
 		"auth_ready":       p.Proxy.HasAuth(),
 		"last_collect":     lastCollect,
 		"last_collect_ok":  lastCollectOK,
@@ -155,6 +157,22 @@ func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
 	stopped := p.Eg.StopCollect()
 	writeJSON(w, map[string]any{"stopped": stopped})
+}
+
+func (p *Panel) forceModel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if body.Enabled {
+		p.Proxy.SetForceModel(p.ProbeModel)
+	} else {
+		p.Proxy.SetForceModel("")
+	}
+	writeJSON(w, map[string]any{"force_model": p.Proxy.ForceModel()})
 }
 
 func (p *Panel) injection(w http.ResponseWriter, r *http.Request) {

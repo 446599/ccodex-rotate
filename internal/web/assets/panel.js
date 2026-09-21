@@ -94,6 +94,11 @@ function renderControls(s) {
   $("injBtn").setAttribute("aria-pressed", String(!!s.inject));
   $("injBtn").classList.toggle("selected", !!s.inject);
   $("injBtn").disabled = false;
+  $("forceBtn").textContent =
+    "luna滚一边去（强制astra）：" + (s.force_model ? "已开启" : "已关闭");
+  $("forceBtn").setAttribute("aria-pressed", String(!!s.force_model));
+  $("forceBtn").classList.toggle("selected", !!s.force_model);
+  $("forceBtn").disabled = false;
   $("mode").textContent = s.manual ? "手动固定" : "自动选择";
   $("rotateBtn").disabled = !!s.manual;
   $("rotateBtn").title = s.manual ? "请先恢复自动，再切换节点" : "切换转发出口";
@@ -390,6 +395,15 @@ $("injBtn").addEventListener("click", () => {
       "/api/injection",
       { enabled: !status.inject },
       "已更新凭据注入设置。",
+    );
+});
+$("forceBtn").addEventListener("click", () => {
+  if (status)
+    mutate(
+      $("forceBtn"),
+      "/api/force-model",
+      { enabled: !status.force_model },
+      "已切换强制模型。",
     );
 });
 $("list").addEventListener("click", (event) => {

@@ -60,6 +60,7 @@ type Server struct {
 	lengths map[int]bool
 	models  *modelid.Resolver
 	inject  atomic.Bool
+	force   atomic.Value // string: forced model ("" = off)
 
 	reqCount int64
 	errCount int64
@@ -134,8 +135,18 @@ func New(cfg config.Config, eg Egress, logf func(string, ...any)) *Server {
 		}
 	}
 	s.inject.Store(cfg.InjectState)
+	s.force.Store(cfg.ForceModel)
 	return s
 }
+
+// ForceModel returns the currently forced model ("" = off).
+func (s *Server) ForceModel() string {
+	v, _ := s.force.Load().(string)
+	return v
+}
+
+// SetForceModel sets (or clears) the forced model at runtime.
+func (s *Server) SetForceModel(name string) { s.force.Store(name) }
 
 // SetInjection enables or disables credential injection at runtime.
 func (s *Server) SetInjection(on bool) { s.inject.Store(on) }
@@ -314,6 +325,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	account := strings.TrimSpace(r.Header.Get("chatgpt-account-id"))
 	model := s.models.Canonical(extractModel(body))
+	// Optionally force the model so every request uses it.
+	if fm := s.ForceModel(); fm != "" {
+		if nb := rewriteModelField(body, fm); nb != nil {
+			body = nb
+			model = s.models.Canonical(fm)
+		}
+	}
 
 	// Remember the account auth so node scans can collect a turn-state.
 	if a := r.Header.Get("Authorization"); a != "" {
@@ -586,6 +604,35 @@ func (r *ring) snapshot() []Record {
 
 // parseInt is a small helper shared by callers parsing config strings.
 func parseInt(s string) int { n, _ := strconv.Atoi(s); return n }
+
+// rewriteModelField replaces the value of the first "model" field in a JSON body
+// without touching anything else. Returns nil if no model field was found.
+func rewriteModelField(b []byte, newModel string) []byte {
+	const k = `"model"`
+	i := bytes.Index(b, []byte(k))
+	if i < 0 {
+		return nil
+	}
+	rest := b[i+len(k):]
+	j := 0
+	for j < len(rest) && (rest[j] == ' ' || rest[j] == ':' || rest[j] == '\t' || rest[j] == '\n' || rest[j] == '\r') {
+		j++
+	}
+	if j >= len(rest) || rest[j] != '"' {
+		return nil
+	}
+	start := i + len(k) + j + 1
+	endRel := bytes.IndexByte(b[start:], '"')
+	if endRel < 0 {
+		return nil
+	}
+	end := start + endRel
+	out := make([]byte, 0, len(b)-((end)-(start))+len(newModel))
+	out = append(out, b[:start]...)
+	out = append(out, newModel...)
+	out = append(out, b[end:]...)
+	return out
+}
 
 // extractModel pulls the "model" field out of a JSON request body without a
 // full parse (bodies may be large or compressed).
