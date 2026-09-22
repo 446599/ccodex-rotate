@@ -525,9 +525,11 @@ func (m *Manager) PrepareProviders(ctx context.Context) ([]Provider, error) {
 			out = append(out, Provider{Name: "custom", Path: dst})
 		}
 	}
-	if len(out) == 0 {
+	if len(out) == 0 && (len(m.cfg.Subscriptions) > 0 || len(m.cfg.Nodes) > 0) {
 		return nil, fmt.Errorf("no usable providers: all subscriptions failed and no custom nodes")
 	}
+	// No sources configured at all (first run): start anyway with DIRECT
+	// fallback so the panel opens and the user can add subscriptions.
 	return out, nil
 }
 
