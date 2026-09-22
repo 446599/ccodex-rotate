@@ -311,7 +311,7 @@ func runServe(cfgPath, codexHome string) {
 	fatal(err)
 	if !cfg.HasSources() {
 		log.Printf("no subscriptions/proxies yet; starting anyway. Open the panel and add a subscription:")
-		log.Printf("  http://%s/panel  (or run: ccodex-rotate sub add \"https://...\")", cfg.Listen)
+		log.Printf("  http://%s/panel  (or run: ccodex-rotate sub add \"https://...\")", cfg.PanelAddress())
 	}
 	dataDir := config.DataDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -389,6 +389,7 @@ func runServe(cfgPath, codexHome string) {
 	panel := &web.Panel{
 		Listen: cfg.Listen, Upstream: cfg.UpstreamBase,
 		Version:    version,
+		Password:   cfg.PanelAuthPassword(),
 		ProbeModel: cfg.ProbeModel, TargetLengths: cfg.StateLengths,
 		SuccessIntervalS: cfg.CollectSuccessIntervalSec, RetryIntervalS: cfg.CollectRetryIntervalSec,
 		HuntNodes:    cfg.HuntNodes,
@@ -473,7 +474,13 @@ func runServe(cfgPath, codexHome string) {
 	root.Handle("/backend-api/codex", srv)
 	root.Handle("/backend-api/codex/", srv)
 	root.Handle("/healthz", srv)
-	root.Handle("/", panel.Handler())
+	panelHandler := panel.Handler()
+	var panelSrv *http.Server
+	if cfg.PanelListen == "" {
+		root.Handle("/", panelHandler)
+	} else {
+		panelSrv = &http.Server{Addr: cfg.PanelListen, Handler: panelHandler, ReadHeaderTimeout: 10 * time.Second}
+	}
 
 	// Astra-window notifications: desktop popup + open panel tabs, cooled
 	// down to one every 10 minutes so a long window does not spam.
@@ -512,7 +519,7 @@ func runServe(cfgPath, codexHome string) {
 		}
 		panel.Broadcast(msg)
 	})
-	httpSrv := &http.Server{Addr: cfg.Listen, Handler: root}
+	httpSrv := &http.Server{Addr: cfg.Listen, Handler: root, ReadHeaderTimeout: 10 * time.Second}
 
 	wired := false
 	cfgFile := codexcfg.Path(firstNonEmpty(cfg.CodexHome, codexHome))
@@ -531,9 +538,16 @@ func runServe(cfgPath, codexHome string) {
 			fatal(err)
 		}
 	}()
-	log.Printf("proxy: http://%s/backend-api/codex   panel: http://%s/panel", cfg.Listen, cfg.Listen)
+	if panelSrv != nil {
+		go func() {
+			if err := panelSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fatal(err)
+			}
+		}()
+	}
+	log.Printf("proxy: http://%s/backend-api/codex   panel: http://%s/panel", cfg.Listen, cfg.PanelAddress())
 	log.Printf("press Ctrl+C to stop")
-	go openBrowser("http://" + cfg.Listen + "/panel")
+	go openBrowser("http://" + cfg.PanelAddress() + "/panel")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -542,6 +556,9 @@ func runServe(cfgPath, codexHome string) {
 	sctx, scancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer scancel()
 	_ = httpSrv.Shutdown(sctx)
+	if panelSrv != nil {
+		_ = panelSrv.Shutdown(sctx)
+	}
 	mgr.Stop()
 	if wired && cfg.RestoreOnExit {
 		if err := codexcfg.Restore(cfgFile); err == nil {
@@ -579,7 +596,7 @@ func runCheck(cfgPath string) {
 func runStatus(cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	fatal(err)
-	body, err := getJSON(cfg.Listen, "/api/status")
+	body, err := getJSON(cfg, "/api/status")
 	fatal(err)
 	fmt.Println(pretty(body))
 }
@@ -587,7 +604,7 @@ func runStatus(cfgPath string) {
 func runNodes(cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	fatal(err)
-	body, err := getJSON(cfg.Listen, "/api/nodes")
+	body, err := getJSON(cfg, "/api/nodes")
 	fatal(err)
 	var payload struct {
 		Current string `json:"current"`
@@ -612,12 +629,8 @@ func runNodes(cfgPath string) {
 func runCollect(cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	fatal(err)
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Post("http://"+cfg.Listen+"/api/collect", "application/json", nil)
-	if err != nil {
-		fatal(fmt.Errorf("is `serve` running? %w", err))
-	}
-	defer resp.Body.Close()
+	_, err = panelRequest(cfg, http.MethodPost, "/api/collect")
+	fatal(err)
 	log.Printf("collection started; check progress with `ccodex-rotate status`")
 }
 
@@ -752,13 +765,27 @@ func runRestore(cfgPath, codexHome string) {
 	log.Printf("restored %s", p)
 }
 
-func getJSON(addr, path string) ([]byte, error) {
+func getJSON(cfg config.Config, path string) ([]byte, error) {
+	return panelRequest(cfg, http.MethodGet, path)
+}
+
+func panelRequest(cfg config.Config, method, path string) ([]byte, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Get("http://" + addr + path)
+	req, err := http.NewRequest(method, "http://"+cfg.PanelAddress()+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if password := cfg.PanelAuthPassword(); password != "" {
+		req.SetBasicAuth("admin", password)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("is `serve` running? %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("panel returned HTTP %d", resp.StatusCode)
+	}
 	return io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 }
 

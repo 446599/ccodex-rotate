@@ -142,31 +142,33 @@ func respCookies(resp *http.Response) []string {
 	return out
 }
 
-// cookieJar keeps upstream cookies per account, refreshed by EVERY upstream
-// response (not just 292 ones) so requests always carry fresh cookies while
-// they are within the TTL. This breaks the chicken-and-egg loop where dry
-// windows meant cookies could never refresh.
+// cookieJar isolates cookies by the same account + canonical model key as turn-state.
+// Callers decide whether a response is eligible to refresh its bundle.
+type cookieKey struct {
+	account string
+	model   string
+}
 type cookieJar struct {
 	mu      sync.Mutex
-	cookies map[string]map[string]string
-	at      map[string]time.Time
+	cookies map[cookieKey]map[string]string
+	at      map[cookieKey]time.Time
 }
 
 func newCookieJar() *cookieJar {
-	return &cookieJar{cookies: map[string]map[string]string{}, at: map[string]time.Time{}}
+	return &cookieJar{cookies: map[cookieKey]map[string]string{}, at: map[cookieKey]time.Time{}}
 }
 
-// store merges name=value pairs into the account's jar.
-func (j *cookieJar) store(account string, pairs []string) {
-	if account == "" || len(pairs) == 0 {
+// store merges name=value pairs into this account/model's jar.
+func (j *cookieJar) store(account, model string, pairs []string) {
+	if account == "" || model == "" || len(pairs) == 0 {
 		return
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	m := j.cookies[account]
+	m := j.cookies[cookieKey{account, model}]
 	if m == nil {
 		m = map[string]string{}
-		j.cookies[account] = m
+		j.cookies[cookieKey{account, model}] = m
 	}
 	for _, p := range pairs {
 		name, value, ok := strings.Cut(p, "=")
@@ -175,19 +177,19 @@ func (j *cookieJar) store(account string, pairs []string) {
 		}
 		m[name] = value
 	}
-	j.at[account] = time.Now()
+	j.at[cookieKey{account, model}] = time.Now()
 }
 
-// fresh returns the account's cookies if harvested within ttl.
-func (j *cookieJar) fresh(account string, ttl time.Duration) ([]string, bool) {
+// fresh returns this account/model's cookies if harvested within ttl.
+func (j *cookieJar) fresh(account, model string, ttl time.Duration) ([]string, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	m := j.cookies[account]
+	m := j.cookies[cookieKey{account, model}]
 	if len(m) == 0 {
 		return nil, false
 	}
 	if ttl > 0 {
-		if at, ok := j.at[account]; !ok || time.Since(at) > ttl {
+		if at, ok := j.at[cookieKey{account, model}]; !ok || time.Since(at) > ttl {
 			return nil, false
 		}
 	}
@@ -204,32 +206,30 @@ func (j *cookieJar) fresh(account string, ttl time.Duration) ([]string, bool) {
 func (j *cookieJar) info() (int, int64) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	names := map[string]bool{}
+	count := 0
 	var newest time.Time
 	for acct, m := range j.cookies {
-		for n := range m {
-			names[n] = true
-		}
+		count += len(m)
 		if at, ok := j.at[acct]; ok && at.After(newest) {
 			newest = at
 		}
 	}
-	if len(names) == 0 {
+	if count == 0 {
 		return 0, -1
 	}
-	return len(names), int64(time.Since(newest).Seconds())
+	return count, int64(time.Since(newest).Seconds())
 }
 
-// drop deletes the account's cookies, voiding them together with a degraded
+// drop deletes only this account/model's cookies together with a degraded
 // bundle. Fresh cookies arrive with the next 292.
-func (j *cookieJar) drop(account string) {
-	if account == "" {
+func (j *cookieJar) drop(account, model string) {
+	if account == "" || model == "" {
 		return
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	delete(j.cookies, account)
-	delete(j.at, account)
+	delete(j.cookies, cookieKey{account, model})
+	delete(j.at, cookieKey{account, model})
 }
 
 // SetOnAuth registers a callback fired once, the first time account auth is
@@ -409,7 +409,7 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 	// overwrite the 292 set). Refresh-all mode keeps the old behavior.
 	if s.jar != nil && (s.cfg.CookieRefreshAll ||
 		(len(value) > 0 && s.lengthAllowed(len(value)))) {
-		s.jar.store(account, respCookies(resp))
+		s.jar.store(account, model, respCookies(resp))
 	}
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
@@ -571,9 +571,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Inject fresh upstream cookies on every request, independent of
-		// turn-state: the jar is refreshed by all responses (even 312s).
+		// turn-state, subject to CookieRefreshAll and the credential TTL.
 		if s.cfg.CookiePin && s.jar != nil && req.Header.Get("Cookie") == "" {
-			if ck, ok := s.jar.fresh(account, s.CredTTL()); ok {
+			if ck, ok := s.jar.fresh(account, model, s.CredTTL()); ok {
 				req.Header.Set("Cookie", strings.Join(ck, "; "))
 				cookieAny = true
 			}
@@ -598,7 +598,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		learned := resp.Header.Get("X-Codex-Turn-State")
 		if s.jar != nil && (s.cfg.CookieRefreshAll ||
 			(learned != "" && s.lengthAllowed(len(learned)))) {
-			s.jar.store(account, respCookies(resp))
+			s.jar.store(account, model, respCookies(resp))
 		}
 		if s.state != nil && model != "" {
 			if v := resp.Header.Get("X-Codex-Turn-State"); v != "" && s.lengthAllowed(len(v)) {
@@ -638,7 +638,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					s.state.Drop(account, model)
 				}
 				if s.jar != nil {
-					s.jar.drop(account)
+					s.jar.drop(account, model)
 				}
 			}
 		}

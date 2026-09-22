@@ -515,11 +515,11 @@ func TestStaleCookiesNotInjected(t *testing.T) {
 	srv, _ := newTestServer(t, httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 	})), 0)
-	srv.jar.store("acct", []string{"SID=abc"})
+	srv.jar.store("acct", "gpt-6-astra", []string{"SID=abc"})
 	srv.jar.mu.Lock()
-	srv.jar.at["acct"] = srv.jar.at["acct"].Add(-time.Hour)
+	srv.jar.at[cookieKey{"acct", "gpt-6-astra"}] = srv.jar.at[cookieKey{"acct", "gpt-6-astra"}].Add(-time.Hour)
 	srv.jar.mu.Unlock()
-	if _, ok := srv.jar.fresh("acct", srv.CredTTL()); ok {
+	if _, ok := srv.jar.fresh("acct", "gpt-6-astra", srv.CredTTL()); ok {
 		t.Fatal("hour-old cookies must not be fresh")
 	}
 }
