@@ -20,6 +20,7 @@ type Panel struct {
 	Listen           string
 	Upstream         string
 	Version          string
+	Password         string
 	ProbeModel       string
 	TargetLengths    []int
 	SuccessIntervalS int
@@ -60,7 +61,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/pin", p.pin)
 	mux.HandleFunc("/api/reset", p.reset)
 	mux.HandleFunc("/api/recheck", p.recheck)
-	return mux
+	return protectPanel(mux, p.Password)
 }
 
 func (p *Panel) page(w http.ResponseWriter, r *http.Request) {

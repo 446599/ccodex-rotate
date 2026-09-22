@@ -1,5 +1,7 @@
 {
   "listen": "127.0.0.1:17850",
+  "panel_listen": "",
+  "panel_password": "",
   "upstream_base": "https://chatgpt.com",
   "mixed_port": 17890,
   "collect_port": 17892,

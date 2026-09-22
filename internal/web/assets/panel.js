@@ -138,8 +138,8 @@ function renderStatus(s) {
   $("requests").textContent = s.requests || 0;
   $("errors").textContent = (s.errors || 0) + " 次错误";
   $("quality").textContent =
-    (s.ok || 0) + " 个已采到凭据 · " + (s.failed || 0) + " 个失败";
-  $("credentialCount").textContent = (s.states || []).length;
+    (s.ok || 0) + " 个已标记可用 · " + (s.failed || 0) + " 个失败";
+  $("credentialCount").textContent = (s.states || []).filter((x) => !x.expired).length;
   $("credentialCount").title =
     Number(s.cookie_count) > 0
       ? "Cookies: " + s.cookie_count + " 个，" + s.cookie_age_sec + " 秒前刷新"
@@ -327,7 +327,7 @@ function renderNodes() {
     return;
   }
   const labels = {
-    ok: "已采到凭据",
+    ok: "已标记可用",
     reachable: "可达 · 未采到",
     unknown: "待检测",
     failed: "暂不可用",
@@ -351,9 +351,9 @@ function renderNodes() {
             "</td><td>" +
             esc(labels[x.state] || x.state) +
             (x.degraded
-              ? ' <span class="badge bad">降智</span>'
+              ? ' <span class="badge bad" title="最近观测到的响应模型名不匹配">最近模型不匹配</span>'
               : x.tested
-                ? ' <span class="badge good">不降智</span>'
+                ? ' <span class="badge good" title="最近观测到的响应模型名匹配，不代表已采到有效凭据">最近模型匹配</span>'
                 : ' <span class="badge">未测</span>') +
             "</td><td>" +
             (x.alive && x.delay > 0 ? esc(x.delay) + " ms" : "—") +

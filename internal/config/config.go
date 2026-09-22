@@ -16,6 +16,11 @@ import (
 type Config struct {
 	// Listen is the address of the local Codex-facing reverse proxy.
 	Listen string `json:"listen"`
+	// PanelListen optionally separates the management listener from the private inference listener.
+	PanelListen string `json:"panel_listen,omitempty"`
+	// PanelPassword enables HTTP Basic authentication (username admin) for the panel and its APIs.
+	// CCODEX_ROTATE_PANEL_PASSWORD takes precedence without being persisted by Save.
+	PanelPassword string `json:"panel_password,omitempty"`
 	// UpstreamBase is the real Codex backend origin (no trailing slash).
 	UpstreamBase string `json:"upstream_base"`
 	// MixedPort is the local mihomo mixed (HTTP/SOCKS) port used for forwarding.
@@ -354,4 +359,20 @@ func randomSecret() string {
 		return "ccodex-rotate"
 	}
 	return hex.EncodeToString(b)
+}
+
+// PanelAddress returns the management listener, defaulting to the shared listener.
+func (c Config) PanelAddress() string {
+	if c.PanelListen != "" {
+		return c.PanelListen
+	}
+	return c.Listen
+}
+
+// PanelAuthPassword resolves the password without copying environment secrets into config files.
+func (c Config) PanelAuthPassword() string {
+	if password := os.Getenv("CCODEX_ROTATE_PANEL_PASSWORD"); password != "" {
+		return password
+	}
+	return c.PanelPassword
 }
