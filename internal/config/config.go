@@ -176,7 +176,7 @@ func Default() Config {
 		MaxBodyMiB:                128,
 		TimeoutSec:                120,
 		InjectState:               true,
-		StateTTLSeconds:           3600,
+		StateTTLSeconds:           240,
 		StateLengths:              []int{292, 332},
 		AutoCollect:               true,
 		AutoConfigCodex:           true,
@@ -288,7 +288,7 @@ func (c *Config) normalize(path string) error {
 		c.SubRefreshMinutes = 0
 	}
 	if c.StateTTLSeconds <= 0 {
-		c.StateTTLSeconds = 3600
+		c.StateTTLSeconds = 240
 	}
 	if c.CredTTLSeconds <= 0 {
 		c.CredTTLSeconds = 240

@@ -655,8 +655,10 @@ func (e *Egress) reachabilityProbe(ctx context.Context, client *http.Client, mod
 	return 0, true, "", "", nil
 }
 
-// Outcome records whether the current node served the requested model, and
-// switches away automatically when it is degraded.
+// Outcome records whether the current node served the requested model. A
+// degraded node is only marked (shown as 降智 in the panel); the exit is
+// never switched automatically, so cookie-pinned bundles keep working on
+// the same exit. Switch exits manually or wait for the periodic hunter.
 func (e *Egress) Outcome(requested, served string) {
 	if served == "" || requested == "" {
 		return
@@ -666,49 +668,8 @@ func (e *Egress) Outcome(requested, served string) {
 		e.p.MarkClean(cur)
 		return
 	}
-	// Degraded: mark and switch to a clean node (unless manually pinned).
 	e.p.MarkDegraded(cur)
-	// Hunt immediately: the next message can ride an open window instead of
-	// waiting for the periodic hunter. Overlapping triggers collapse via
-	// the shared collecting guard and the throttle below.
-	e.maybeHuntOnDegrade(requested)
-	if e.Manual() != "" {
-		return
-	}
-	name, ok := e.p.Next(cur)
-	if !ok || name == cur {
-		return
-	}
-	sctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	if err := e.m.Select(sctx, MainGroup, name); err == nil {
-		e.mu.Lock()
-		e.current = name
-		e.mu.Unlock()
-		e.logEvent(requested, fmt.Sprintf("降智：%s 实际返回 %s，已换到 %s", cur, served, name))
-	}
-}
-
-// maybeHuntOnDegrade kicks off one async hunt round right after a target
-// request is downgraded. It only fires for the probe (astra) model and is
-// throttled to half the hunter interval so a burst of degraded requests
-// does not stack hunts.
-func (e *Egress) maybeHuntOnDegrade(model string) {
-	if model == "" || model != e.m.cfg.ProbeModel {
-		return
-	}
-	e.mu.Lock()
-	last := e.lastHunt
-	e.mu.Unlock()
-	max := e.m.cfg.HuntNodes
-	gap := time.Duration(e.m.cfg.HuntIntervalSec/2) * time.Second
-	if gap < 30*time.Second {
-		gap = 30 * time.Second
-	}
-	if time.Since(last) < gap {
-		return
-	}
-	go e.Hunt(context.Background(), model, max)
+	e.logEvent(requested, fmt.Sprintf("降智：%s 实际返回 %s（仅标记，不自动切换）", cur, served))
 }
 
 const versionish = "0.1"

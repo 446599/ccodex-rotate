@@ -209,12 +209,13 @@ func (s *Server) InjectionEnabled() bool { return s.inject.Load() }
 // StateTTLSeconds is the credential validity window.
 func (s *Server) StateTTLSeconds() int { return s.cfg.StateTTLSeconds }
 
-// StateSnapshot returns the cached turn-state entries for the panel.
+// StateSnapshot returns the cached turn-state entries for the panel,
+// including recently expired ones (flagged) for display.
 func (s *Server) StateSnapshot() []turnstate.Entry {
 	if s.state == nil {
 		return nil
 	}
-	return s.state.Snapshot()
+	return s.state.SnapshotAll()
 }
 
 // HasValidState reports whether a usable turn-state is cached for model.

@@ -29,7 +29,7 @@
   "max_body_mib": 128,
   "timeout_seconds": 120,
   "inject_state": true,
-  "state_ttl_seconds": 3600,
+  "state_ttl_seconds": 240,
   "state_lengths": [292, 332],
   "inject_node_affinity": false,
   "cookie_pin_enabled": true,

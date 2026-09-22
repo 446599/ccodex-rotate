@@ -647,6 +647,17 @@ func huntLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress) {
 // stopping on the first success per model.
 func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trigger <-chan struct{}, haveState func(string) bool) {
 	targets := append([]string{cfg.ProbeModel}, cfg.CollectModels...)
+	firstTarget := ""
+	for _, m := range targets {
+		if m != "" {
+			firstTarget = m
+			break
+		}
+	}
+	// refreshAt forces a re-collection when it elapses, even if a usable
+	// state exists: a 292 bundle is only valid ~240s, so after each 292
+	// success we pause briefly and harvest a fresh one.
+	var refreshAt time.Time
 	// Do not collect until the client actually asks for a target model.
 	select {
 	case <-ctx.Done():
@@ -665,13 +676,27 @@ func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trig
 				break
 			}
 		}
+		if need == "" && firstTarget != "" && !refreshAt.IsZero() && !time.Now().Before(refreshAt) {
+			need = firstTarget
+			refreshAt = time.Time{}
+			log.Printf("292 refresh due; collecting a fresh bundle")
+		}
 		if need == "" {
 			// Every target model already has a usable state.
+			wait := time.Duration(cfg.CollectSuccessIntervalSec) * time.Second
+			if !refreshAt.IsZero() {
+				if d := time.Until(refreshAt); d < wait {
+					if d < 0 {
+						d = 0
+					}
+					wait = d
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-trigger:
-			case <-time.After(time.Duration(cfg.CollectSuccessIntervalSec) * time.Second):
+			case <-time.After(wait):
 			}
 			continue
 		}
@@ -687,11 +712,23 @@ func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trig
 			// A fresh 292 (+cookies) only stays valid ~240s: pause briefly,
 			// then collect again so the bundle is continuously refreshed.
 			if slices.Contains(cfg.StateLengths, eg.LastSeenLength()) {
-				wait = time.Duration(cfg.CredRefreshPauseSec) * time.Second
-				log.Printf("292 bundle harvested; refreshing again in %s", wait)
+				refreshAt = time.Now().Add(time.Duration(cfg.CredRefreshPauseSec) * time.Second)
+				log.Printf("292 bundle harvested; refreshing again in %s", time.Until(refreshAt).Round(time.Second))
+			} else {
+				refreshAt = time.Time{}
 			}
 		} else {
+			refreshAt = time.Time{}
 			log.Printf("no turn-state for %s this round; retrying in %s", need, wait)
+		}
+		// A pending refresh always wins over the long success interval.
+		if !refreshAt.IsZero() {
+			if d := time.Until(refreshAt); d < wait {
+				if d < 0 {
+					d = 0
+				}
+				wait = d
+			}
 		}
 		select {
 		case <-ctx.Done():

@@ -22,6 +22,9 @@ type Entry struct {
 	Hits        int       `json:"hits"`
 	Cookies     []string  `json:"-"`
 	CookieCount int       `json:"cookie_count"`
+	// Expired is set by snapshots when the entry outlived the store TTL.
+	// Expired bundles are shown in the panel but never injected.
+	Expired bool `json:"expired,omitempty"`
 }
 
 // Store is a concurrency-safe cache keyed by account+model.
@@ -130,6 +133,28 @@ func (s *Store) Snapshot() []Entry {
 			continue
 		}
 		out = append(out, *e)
+	}
+	return out
+}
+
+// SnapshotAll returns every entry including expired ones (flagged), so the
+// panel can display 过期 bundles. Expired entries are pruned lazily.
+func (s *Store) SnapshotAll() []Entry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	out := make([]Entry, 0, len(s.entries))
+	for k, e := range s.entries {
+		cp := *e
+		if s.ttl > 0 && now.Sub(e.Created) > s.ttl {
+			// Drop bundles dead for over an hour; keep recent ones visible.
+			if now.Sub(e.Created) > time.Hour {
+				delete(s.entries, k)
+				continue
+			}
+			cp.Expired = true
+		}
+		out = append(out, cp)
 	}
 	return out
 }
