@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ccodex-rotate/internal/config"
 )
@@ -387,5 +388,93 @@ func TestExhaustedRetriesReturnsLastStatus(t *testing.T) {
 	}
 	if fe.rotates != 2 {
 		t.Fatalf("want 2 rotations, got %d", fe.rotates)
+	}
+}
+
+func TestCookiesHarvestedFromAnyResponse(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A 312-style (non-target) response still sets cookies.
+		w.Header().Add("Set-Cookie", "SID=abc; Path=/")
+		w.Header().Add("Set-Cookie", "__cflb=xyz; Path=/")
+		w.Header().Set("X-Codex-Turn-State", strings.Repeat("B", 312))
+		w.Write([]byte(`{"model":"gpt-5.6-luna"}`))
+	}))
+	defer up.Close()
+
+	srv, _ := newTestServer(t, up, 0)
+	srv.authMu.Lock()
+	srv.auth, srv.account = "Bearer test", "acct"
+	srv.authMu.Unlock()
+
+	if _, _, _, _, err := srv.Probe(context.Background(), &http.Client{}, "gpt-6-astra"); err != nil {
+		t.Fatal(err)
+	}
+	n, age := srv.CookieInfo()
+	if n != 2 {
+		t.Fatalf("expected 2 cookies harvested, got %d", n)
+	}
+	if age < 0 {
+		t.Fatalf("expected fresh jar, got age %d", age)
+	}
+	// 312 must not be cached as a turn-state, but cookies must be kept.
+	if len(srv.StateSnapshot()) != 0 {
+		t.Fatalf("312 must not be cached as state")
+	}
+}
+
+func TestFreshCookiesInjectedOnRequests(t *testing.T) {
+	var mu sync.Mutex
+	var gotCookie []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotCookie = append(gotCookie, r.Header.Get("Cookie"))
+		mu.Unlock()
+		w.Header().Add("Set-Cookie", "SID=abc; Path=/")
+		w.Write([]byte("ok"))
+	}))
+	defer up.Close()
+
+	srv, _ := newTestServer(t, up, 0)
+	front := httptest.NewServer(srv)
+	defer front.Close()
+
+	body := `{"model":"gpt-6-astra","input":"hi"}`
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequest(http.MethodPost, front.URL+"/backend-api/codex/responses", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer test")
+		req.Header.Set("chatgpt-account-id", "acct")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotCookie) != 2 {
+		t.Fatalf("expected 2 upstream calls, got %d", len(gotCookie))
+	}
+	if gotCookie[0] != "" {
+		t.Fatalf("first request must not carry cookies, got %q", gotCookie[0])
+	}
+	if gotCookie[1] != "SID=abc" {
+		t.Fatalf("second request must carry fresh cookies, got %q", gotCookie[1])
+	}
+}
+
+func TestStaleCookiesNotInjected(t *testing.T) {
+	srv, _ := newTestServer(t, httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	})), 0)
+	srv.jar.store("acct", []string{"SID=abc"})
+	srv.jar.mu.Lock()
+	srv.jar.at["acct"] = srv.jar.at["acct"].Add(-time.Hour)
+	srv.jar.mu.Unlock()
+	if _, ok := srv.jar.fresh("acct", srv.CredTTL()); ok {
+		t.Fatal("hour-old cookies must not be fresh")
 	}
 }

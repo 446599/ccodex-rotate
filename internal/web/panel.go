@@ -77,6 +77,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 	ctried, ctotal := p.Eg.CollectProgress()
 	seenModel, seenLen := p.Eg.LastSeen()
 	lastHunt, lastHuntFound := p.Eg.HuntInfo()
+	ccCount, ccAge := p.Proxy.CookieInfo()
 	reqs, errs, recent := p.Proxy.Stats()
 	m := map[string]any{
 		"listen":           p.Listen,
@@ -113,7 +114,8 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"states":           p.Proxy.StateSnapshot(),
 		"state_ttl":        p.Proxy.StateTTLSeconds(),
 		"cred_ttl":         int(p.Proxy.CredTTL().Seconds()),
-		"mihomo_error":     errString(p.Mgr.Err()),
+		"cookie_count":     ccCount,
+		"cookie_age_sec":   ccAge, "mihomo_error": errString(p.Mgr.Err()),
 	}
 	if p.SourcesCounts != nil {
 		s, n, px := p.SourcesCounts()

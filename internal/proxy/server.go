@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -100,7 +101,17 @@ type Server struct {
 	onNeed     func(model string)
 	collectSet map[string]bool
 
+	jar *cookieJar
+
 	onCredExpired func(model string)
+}
+
+// CookieInfo returns the cookie jar size and freshest age in seconds.
+func (s *Server) CookieInfo() (int, int64) {
+	if s.jar == nil {
+		return 0, -1
+	}
+	return s.jar.info()
 }
 
 // SetOnCredExpired registers a callback fired when a live request arrives
@@ -129,6 +140,84 @@ func respCookies(resp *http.Response) []string {
 		out = append(out, c.Name+"="+c.Value)
 	}
 	return out
+}
+
+// cookieJar keeps upstream cookies per account, refreshed by EVERY upstream
+// response (not just 292 ones) so requests always carry fresh cookies while
+// they are within the TTL. This breaks the chicken-and-egg loop where dry
+// windows meant cookies could never refresh.
+type cookieJar struct {
+	mu      sync.Mutex
+	cookies map[string]map[string]string
+	at      map[string]time.Time
+}
+
+func newCookieJar() *cookieJar {
+	return &cookieJar{cookies: map[string]map[string]string{}, at: map[string]time.Time{}}
+}
+
+// store merges name=value pairs into the account's jar.
+func (j *cookieJar) store(account string, pairs []string) {
+	if account == "" || len(pairs) == 0 {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	m := j.cookies[account]
+	if m == nil {
+		m = map[string]string{}
+		j.cookies[account] = m
+	}
+	for _, p := range pairs {
+		name, value, ok := strings.Cut(p, "=")
+		if !ok || name == "" {
+			continue
+		}
+		m[name] = value
+	}
+	j.at[account] = time.Now()
+}
+
+// fresh returns the account's cookies if harvested within ttl.
+func (j *cookieJar) fresh(account string, ttl time.Duration) ([]string, bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	m := j.cookies[account]
+	if len(m) == 0 {
+		return nil, false
+	}
+	if ttl > 0 {
+		if at, ok := j.at[account]; !ok || time.Since(at) > ttl {
+			return nil, false
+		}
+	}
+	out := make([]string, 0, len(m))
+	for n, v := range m {
+		out = append(out, n+"="+v)
+	}
+	sort.Strings(out)
+	return out, true
+}
+
+// info returns the total cookie count and the freshest age in seconds
+// (-1 when the jar is empty).
+func (j *cookieJar) info() (int, int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	names := map[string]bool{}
+	var newest time.Time
+	for acct, m := range j.cookies {
+		for n := range m {
+			names[n] = true
+		}
+		if at, ok := j.at[acct]; ok && at.After(newest) {
+			newest = at
+		}
+	}
+	if len(names) == 0 {
+		return 0, -1
+	}
+	return len(names), int64(time.Since(newest).Seconds())
 }
 
 // SetOnAuth registers a callback fired once, the first time account auth is
@@ -177,7 +266,7 @@ func New(cfg config.Config, eg Egress, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	s := &Server{cfg: cfg, eg: eg, logf: logf, recent: newRing(50), models: modelid.New(cfg.ModelAliases)}
+	s := &Server{cfg: cfg, eg: eg, logf: logf, recent: newRing(50), models: modelid.New(cfg.ModelAliases), jar: newCookieJar()}
 	// The state store is always created so injection can be toggled at runtime.
 	s.state = turnstate.New(time.Duration(cfg.StateTTLSeconds) * time.Second)
 	if len(cfg.StateLengths) > 0 {
@@ -303,6 +392,11 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 	prefix, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
 	served := extractModel(prefix)
+	// Harvest cookies from every probe response, not just 292 ones, so the
+	// jar stays fresh even through dry windows.
+	if s.jar != nil {
+		s.jar.store(account, respCookies(resp))
+	}
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
 		return 0, false, "", served, nil
@@ -435,8 +529,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Host = "" // let net/http set from URL
 		req.ContentLength = int64(len(body))
 
-		// Inject a cached turn-state (can be toggled off at runtime), plus
-		// the cookies harvested with it while the bundle is fresh.
+		// Inject a cached turn-state (can be toggled off at runtime).
 		if s.inject.Load() && s.state != nil && model != "" {
 			if e, ok := s.state.Get(account, model); ok && s.lengthAllowed(e.Length) {
 				inject := true
@@ -447,15 +540,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					req.Header.Set("X-Codex-Turn-State", e.Value)
 					s.state.Hit(account, model)
 					injectedAny = true
-					if fe, fresh := s.state.Fresh(account, model, s.CredTTL()); fresh {
-						if s.cfg.CookiePin && len(fe.Cookies) > 0 {
-							req.Header.Set("Cookie", strings.Join(fe.Cookies, "; "))
-							cookieAny = true
+					if _, fresh := s.state.Fresh(account, model, s.CredTTL()); !fresh {
+						if s.onCredExpired != nil {
+							s.onCredExpired(model)
 						}
-					} else if s.onCredExpired != nil {
-						s.onCredExpired(model)
 					}
 				}
+			}
+		}
+
+		// Inject fresh upstream cookies on every request, independent of
+		// turn-state: the jar is refreshed by all responses (even 312s).
+		if s.cfg.CookiePin && s.jar != nil && req.Header.Get("Cookie") == "" {
+			if ck, ok := s.jar.fresh(account, s.CredTTL()); ok {
+				req.Header.Set("Cookie", strings.Join(ck, "; "))
+				cookieAny = true
 			}
 		}
 
@@ -473,8 +572,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Learn the turn-state the upstream just issued, but only keep a value
 		// of an accepted length (otherwise a wrong-length value would suppress
-		// both collection and injection). Cookies arriving with a 292 are
-		// harvested into the same bundle.
+		// both collection and injection). Cookies are harvested from every
+		// live response into the jar regardless of length.
+		if s.jar != nil {
+			s.jar.store(account, respCookies(resp))
+		}
 		if s.state != nil && model != "" {
 			if v := resp.Header.Get("X-Codex-Turn-State"); v != "" && s.lengthAllowed(len(v)) {
 				s.state.PutFull(account, model, s.eg.Current(), v, respCookies(resp))

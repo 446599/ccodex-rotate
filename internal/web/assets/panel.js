@@ -134,6 +134,10 @@ function renderStatus(s) {
   $("quality").textContent =
     (s.ok || 0) + " 个已采到凭据 · " + (s.failed || 0) + " 个失败";
   $("credentialCount").textContent = (s.states || []).length;
+  $("credentialCount").title =
+    Number(s.cookie_count) > 0
+      ? "Cookies: " + s.cookie_count + " 个，" + s.cookie_age_sec + " 秒前刷新"
+      : "Cookies 罐是空的（尚无上游响应）";
   $("node").textContent = s.node || "等待可用节点";
   $("srcCounts").textContent =
     (s.subs || 0) +
