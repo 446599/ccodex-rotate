@@ -37,10 +37,26 @@ type Egress struct {
 	collectTotal  int
 	lastSeenLen   int
 	lastSeenModel string
+	lastHunt      time.Time
+	lastHuntFound string
+	huntCursor    int
 	collectLog    []CollectEvent
 	stopCollect   context.CancelFunc
 	probe         ProbeFunc
 	manual        bool // forwarding exit manually pinned; collection ignores it
+	notify        func(string)
+}
+
+// SetNotify installs a callback fired when an astra window is found (hunt
+// hit or a collected astra-chain state). It is used for desktop/browser
+// notifications. The callback must be non-blocking and must not call back
+// into Egress.
+func (e *Egress) SetNotify(f func(string)) { e.notify = f }
+
+func (e *Egress) fireNotify(msg string) {
+	if e.notify != nil {
+		e.notify(msg)
+	}
 }
 
 func (e *Egress) logEvent(model, msg string) {
@@ -234,6 +250,7 @@ func (e *Egress) EnsureHealthy(ctx context.Context) (string, bool) {
 
 // Reset returns the selector to the fastest member of the AUTO group.
 func (e *Egress) Reset(ctx context.Context) error {
+	e.p.ClearDegraded()
 	sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	if err := e.m.Select(sctx, MainGroup, AutoGroup); err != nil {
@@ -381,7 +398,14 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 		switch {
 		case err == nil && length > 0 && (len(targets) == 0 || targets[length]):
 			e.p.MarkOK(name, 0)
-			e.logEvent(model, fmt.Sprintf("采到 %d 字符 @ %s", length, name))
+			svc := served
+			if svc == "" {
+				svc = "未知模型"
+			}
+			e.logEvent(model, fmt.Sprintf("采到 %d 字符 @ %s（实际 %s）", length, name, svc))
+			if served == model && model == e.m.cfg.ProbeModel {
+				e.fireNotify("Astra 可用（采集）：" + name)
+			}
 			e.finishCollect(true)
 			return true
 		case err != nil:
@@ -417,6 +441,133 @@ func (e *Egress) StopCollect() bool {
 	}
 	e.stopCollect()
 	return true
+}
+
+// HuntInfo returns the last hunt time and the exit most recently found
+// serving the target model.
+func (e *Egress) HuntInfo() (time.Time, string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastHunt, e.lastHuntFound
+}
+
+// SwitchTo moves the forwarding exit to name without pinning it manually,
+// so later degradation can still switch away automatically.
+func (e *Egress) SwitchTo(ctx context.Context, name string) error {
+	if name == "" || e.Manual() != "" || name == e.Current() {
+		return nil
+	}
+	sctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	if err := e.m.Select(sctx, MainGroup, name); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.current = name
+	e.mu.Unlock()
+	return nil
+}
+
+// Hunt probes up to max nodes for one currently serving model (an "astra
+// window"). Upstream routing rotates every few minutes, so a full collection
+// round is too slow to catch a window: Hunt checks a few promising exits and,
+// on a hit, moves forwarding there immediately. It shares the collecting
+// guard with Collect so the two never run at once.
+func (e *Egress) Hunt(ctx context.Context, model string, max int) (string, bool) {
+	e.mu.Lock()
+	if e.collecting {
+		e.mu.Unlock()
+		return "", false
+	}
+	e.collecting = true
+	probe := e.probe
+	cctx, cancel := context.WithCancel(ctx)
+	e.stopCollect = cancel
+	e.mu.Unlock()
+	defer func() {
+		cancel()
+		e.mu.Lock()
+		e.collecting = false
+		e.stopCollect = nil
+		e.lastHunt = time.Now()
+		e.mu.Unlock()
+	}()
+	ctx = cctx
+
+	if max <= 0 {
+		max = 4
+	}
+	if err := e.RefreshNodes(ctx); err != nil {
+		return "", false
+	}
+	cands := e.p.Snapshot()
+	if len(cands) == 0 {
+		return "", false
+	}
+	// Rotate the start offset every round so the hunter sweeps the whole
+	// pool over time instead of re-probing the same first exits.
+	e.mu.Lock()
+	start := e.huntCursor % len(cands)
+	e.huntCursor++
+	e.mu.Unlock()
+	rot := append(append([]pool.Entry{}, cands[start:]...), cands[:start]...)
+	if len(rot) > max {
+		rot = rot[:max]
+	}
+	cands = rot
+	if probe == nil {
+		probe = e.reachabilityProbe
+	}
+	timeout := time.Duration(e.m.cfg.ProbeTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	client := e.collectClient(timeout)
+	for _, ent := range cands {
+		if ctx.Err() != nil {
+			break
+		}
+		name := ent.Name
+		if err := e.m.Select(ctx, CollectGroup, name); err != nil {
+			continue
+		}
+		length, reachable, _, served, err := probe(ctx, client, model)
+		if length > 0 {
+			e.mu.Lock()
+			e.lastSeenLen = length
+			e.lastSeenModel = model
+			e.mu.Unlock()
+		}
+		if served != "" {
+			if s := e.m.cfg.ProbeModel; served == model || served == s {
+				e.p.MarkClean(name)
+			} else {
+				e.p.MarkDegraded(name)
+			}
+		}
+		if err != nil {
+			e.p.MarkFail(name, "error")
+			continue
+		}
+		if !reachable {
+			e.p.MarkFail(name, "blocked")
+			continue
+		}
+		if served == model {
+			e.p.MarkOK(name, 0)
+			e.logEvent(model, fmt.Sprintf("astra窗口：%s 正在服务 %s，已切过去", name, model))
+			e.fireNotify("Astra 可用：" + name + "，已切过去")
+			e.mu.Lock()
+			e.lastHuntFound = name
+			e.mu.Unlock()
+			if err := e.SwitchTo(ctx, name); err == nil {
+				return name, true
+			}
+			return name, true
+		}
+		e.p.MarkReachable(name)
+	}
+	return "", false
 }
 
 // preferOK orders candidates so nodes already known to yield the target state
@@ -509,6 +660,10 @@ func (e *Egress) Outcome(requested, served string) {
 	}
 	// Degraded: mark and switch to a clean node (unless manually pinned).
 	e.p.MarkDegraded(cur)
+	// Hunt immediately: the next message can ride an open window instead of
+	// waiting for the periodic hunter. Overlapping triggers collapse via
+	// the shared collecting guard and the throttle below.
+	e.maybeHuntOnDegrade(requested)
 	if e.Manual() != "" {
 		return
 	}
@@ -524,6 +679,28 @@ func (e *Egress) Outcome(requested, served string) {
 		e.mu.Unlock()
 		e.logEvent(requested, fmt.Sprintf("降智：%s 实际返回 %s，已换到 %s", cur, served, name))
 	}
+}
+
+// maybeHuntOnDegrade kicks off one async hunt round right after a target
+// request is downgraded. It only fires for the probe (astra) model and is
+// throttled to half the hunter interval so a burst of degraded requests
+// does not stack hunts.
+func (e *Egress) maybeHuntOnDegrade(model string) {
+	if model == "" || model != e.m.cfg.ProbeModel {
+		return
+	}
+	e.mu.Lock()
+	last := e.lastHunt
+	e.mu.Unlock()
+	max := e.m.cfg.HuntNodes
+	gap := time.Duration(e.m.cfg.HuntIntervalSec/2) * time.Second
+	if gap < 30*time.Second {
+		gap = 30 * time.Second
+	}
+	if time.Since(last) < gap {
+		return
+	}
+	go e.Hunt(context.Background(), model, max)
 }
 
 const versionish = "0.1"

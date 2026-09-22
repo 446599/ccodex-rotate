@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,7 +32,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.4.2"
+const version = "0.4.4"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -380,12 +381,16 @@ func runServe(cfgPath, codexHome string) {
 		srv.SetCollectModels(cfg.CollectModels)
 		go collectLoop(ctx, cfg, eg, trigger, srv.HasValidState)
 	}
+	if cfg.ProbeEnabled && cfg.HuntEnabled {
+		go huntLoop(ctx, cfg, eg)
+	}
 
 	panel := &web.Panel{
 		Listen: cfg.Listen, Upstream: cfg.UpstreamBase,
 		ProbeModel: cfg.ProbeModel, TargetLengths: cfg.StateLengths,
 		SuccessIntervalS: cfg.CollectSuccessIntervalSec, RetryIntervalS: cfg.CollectRetryIntervalSec,
-		Mgr: mgr, Eg: eg, Proxy: srv,
+		HuntNodes: cfg.HuntNodes,
+		Mgr:       mgr, Eg: eg, Proxy: srv,
 	}
 	if trigger != nil {
 		panel.Trigger = func() {
@@ -466,6 +471,26 @@ func runServe(cfgPath, codexHome string) {
 	root.Handle("/backend-api/codex/", srv)
 	root.Handle("/healthz", srv)
 	root.Handle("/", panel.Handler())
+
+	// Astra-window notifications: desktop popup + open panel tabs, cooled
+	// down to one every 10 minutes so a long window does not spam.
+	var notifyMu sync.Mutex
+	lastNotify := time.Time{}
+	eg.SetNotify(func(msg string) {
+		notifyMu.Lock()
+		cooled := time.Since(lastNotify) < 10*time.Minute
+		if !cooled {
+			lastNotify = time.Now()
+		}
+		notifyMu.Unlock()
+		if cooled {
+			return
+		}
+		if cfg.NotifyEnabled {
+			desktopNotify("ccodex-rotate", msg)
+		}
+		panel.Broadcast(msg)
+	})
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: root}
 
 	wired := false
@@ -573,6 +598,24 @@ func runCollect(cfgPath string) {
 	}
 	defer resp.Body.Close()
 	log.Printf("collection started; check progress with `ccodex-rotate status`")
+}
+
+// huntLoop periodically probes a few exits for an "astra window" (an exit
+// currently serving the target model) and moves forwarding onto it, because
+// upstream routing rotates every few minutes.
+func huntLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress) {
+	t := time.NewTicker(time.Duration(cfg.HuntIntervalSec) * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if name, ok := eg.Hunt(ctx, cfg.ProbeModel, cfg.HuntNodes); ok {
+				log.Printf("astra窗口：%s 正在服务 %s，已切过去", name, cfg.ProbeModel)
+			}
+		}
+	}
 }
 
 // collectLoop collects a turn-state, then waits 30 minutes after success or
@@ -683,6 +726,33 @@ func fatal(err error) {
 		log.Fatalf("error: %v", err)
 	}
 }
+
+// desktopNotify pops a best-effort OS notification in the background.
+func desktopNotify(title, body string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.CommandContext(ctx, "osascript", "-e",
+				`display notification "`+osascriptEscape(body)+`" with title "`+osascriptEscape(title)+`" sound name "Glass"`)
+		case "windows":
+			ps := `(New-Object -ComObject WScript.Shell).Popup('` + psEscape(body) + `', 8, '` + psEscape(title) + `', 64)`
+			cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command", ps)
+		default:
+			cmd = exec.CommandContext(ctx, "notify-send", title, body)
+		}
+		_ = cmd.Run()
+	}()
+}
+
+func osascriptEscape(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+func psEscape(s string) string { return strings.ReplaceAll(s, `'`, `''`) }
 
 // openBrowser opens a URL in the default browser on macOS/Windows/Linux.
 func openBrowser(url string) {

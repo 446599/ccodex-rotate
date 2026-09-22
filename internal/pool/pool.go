@@ -22,32 +22,35 @@ const (
 
 // Entry is the persisted health record of one node.
 type Entry struct {
-	Name      string    `json:"name"`
-	Delay     int       `json:"delay"`
-	State     string    `json:"state"`
-	Degraded  bool      `json:"degraded"` // served a different model than requested
-	FailUntil time.Time `json:"fail_until"`
-	LastOK    time.Time `json:"last_ok"`
-	Reason    string    `json:"reason,omitempty"`
+	Name       string    `json:"name"`
+	Delay      int       `json:"delay"`
+	State      string    `json:"state"`
+	Degraded   bool      `json:"degraded"` // served a different model than requested
+	DegradedAt time.Time `json:"degraded_at,omitempty"`
+	FailUntil  time.Time `json:"fail_until"`
+	LastOK     time.Time `json:"last_ok"`
+	Reason     string    `json:"reason,omitempty"`
 }
 
 // Pool holds node state.
 type Pool struct {
-	mu       sync.Mutex
-	entries  map[string]*Entry
-	order    []string
-	path     string
-	failTTL  time.Duration
-	blockTTL time.Duration
+	mu          sync.Mutex
+	entries     map[string]*Entry
+	order       []string
+	path        string
+	failTTL     time.Duration
+	blockTTL    time.Duration
+	degradedTTL time.Duration // a degraded mark older than this is treated as clean
 }
 
 // New creates a pool persisting to path.
 func New(path string) *Pool {
 	p := &Pool{
-		entries:  map[string]*Entry{},
-		path:     path,
-		failTTL:  90 * time.Second,
-		blockTTL: 300 * time.Second,
+		entries:     map[string]*Entry{},
+		path:        path,
+		failTTL:     90 * time.Second,
+		blockTTL:    300 * time.Second,
+		degradedTTL: 10 * time.Minute,
 	}
 	p.load()
 	return p
@@ -133,6 +136,7 @@ func (p *Pool) MarkClean(name string) {
 	defer p.mu.Unlock()
 	e := p.ensure(name)
 	e.Degraded = false
+	e.DegradedAt = time.Time{}
 	p.saveLocked()
 }
 
@@ -145,7 +149,29 @@ func (p *Pool) MarkDegraded(name string) {
 	defer p.mu.Unlock()
 	e := p.ensure(name)
 	e.Degraded = true
+	e.DegradedAt = time.Now()
 	p.saveLocked()
+}
+
+// ClearDegraded drops every degraded mark (used by "back to auto").
+func (p *Pool) ClearDegraded() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.entries {
+		e.Degraded = false
+		e.DegradedAt = time.Time{}
+	}
+	p.saveLocked()
+}
+
+// degradedActive reports whether the degraded mark still counts. Marks decay
+// because upstream routing rotates every few minutes: an exit that served
+// luna ten minutes ago may serve astra now.
+func (p *Pool) degradedActive(e *Entry) bool {
+	if e == nil || !e.Degraded {
+		return false
+	}
+	return time.Since(e.DegradedAt) < p.degradedTTL
 }
 
 // MarkReachable records a node that answers but does not yield the target state.
@@ -227,13 +253,13 @@ func (p *Pool) Next(exclude string) (string, bool) {
 		}
 		return ""
 	}
-	if n := pick(func(e *Entry) bool { return e.State == OK && !e.Degraded }); n != "" {
+	if n := pick(func(e *Entry) bool { return e.State == OK && !p.degradedActive(e) }); n != "" {
 		return n, true
 	}
 	if n := pick(func(e *Entry) bool { return e.State == OK }); n != "" {
 		return n, true
 	}
-	if n := pick(func(e *Entry) bool { return e.State == Reachable && !e.Degraded && p.usable(e) }); n != "" {
+	if n := pick(func(e *Entry) bool { return e.State == Reachable && !p.degradedActive(e) && p.usable(e) }); n != "" {
 		return n, true
 	}
 	if n := pick(func(e *Entry) bool { return e.State == Reachable && p.usable(e) }); n != "" {
@@ -254,12 +280,24 @@ func (p *Pool) Next(exclude string) (string, bool) {
 	return "", false
 }
 
-// Snapshot returns a copy of all entries, best first.
+// Snapshot returns a copy of all entries, best first. Expired degraded marks
+// are cleared here so the panel and the persisted file stay honest.
 func (p *Pool) Snapshot() []Entry {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := make([]Entry, 0, len(p.order))
 	now := time.Now()
+	dirty := false
+	for _, e := range p.entries {
+		if e.Degraded && now.Sub(e.DegradedAt) >= p.degradedTTL {
+			e.Degraded = false
+			e.DegradedAt = time.Time{}
+			dirty = true
+		}
+	}
+	if dirty {
+		p.saveLocked()
+	}
+	out := make([]Entry, 0, len(p.order))
 	for _, n := range p.order {
 		e := *p.entries[n]
 		if e.State == Failed && !now.Before(e.FailUntil) {
@@ -267,7 +305,7 @@ func (p *Pool) Snapshot() []Entry {
 		}
 		out = append(out, e)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return rank(out[i]) < rank(out[j]) })
+	sort.SliceStable(out, func(i, j int) bool { return p.rank(out[i]) < p.rank(out[j]) })
 	return out
 }
 
@@ -292,8 +330,8 @@ func (p *Pool) Counts() (int, int, int, int, int) {
 	return ok, reach, un, bad, len(p.order)
 }
 
-func rank(e Entry) int {
-	if e.Degraded {
+func (p *Pool) rank(e Entry) int {
+	if p.degradedActive(&e) {
 		return 9
 	}
 	switch e.State {

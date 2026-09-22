@@ -94,11 +94,6 @@ function renderControls(s) {
   $("injBtn").setAttribute("aria-pressed", String(!!s.inject));
   $("injBtn").classList.toggle("selected", !!s.inject);
   $("injBtn").disabled = false;
-  $("forceBtn").textContent =
-    "luna滚一边去（强制astra）：" + (s.force_model ? "已开启" : "已关闭");
-  $("forceBtn").setAttribute("aria-pressed", String(!!s.force_model));
-  $("forceBtn").classList.toggle("selected", !!s.force_model);
-  $("forceBtn").disabled = false;
   $("mode").textContent = s.manual ? "手动固定" : "自动选择";
   $("rotateBtn").disabled = !!s.manual;
   $("rotateBtn").title = s.manual ? "请先恢复自动，再切换节点" : "切换转发出口";
@@ -411,15 +406,6 @@ $("injBtn").addEventListener("click", () => {
       "已更新凭据注入设置。",
     );
 });
-$("forceBtn").addEventListener("click", () => {
-  if (status)
-    mutate(
-      $("forceBtn"),
-      "/api/force-model",
-      { enabled: !status.force_model },
-      "已切换强制模型。",
-    );
-});
 $("list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-pin]");
   if (button)
@@ -581,6 +567,103 @@ try {
 } catch (_) {}
 if (!seen) openGuide();
 setInterval(tick, 1000);
+// Astra 到货提醒：SSE 事件 + 浏览器通知 + 声音 + 标题闪烁。
+const notifyKey = "ccodex-rotate.notify";
+let notifyOn = false,
+  titleTimer = null,
+  audioCtx = null;
+try {
+  notifyOn = localStorage.getItem(notifyKey) === "on";
+} catch (_) {}
+function renderNotifyBtn() {
+  const button = $("notifyBtn");
+  if (!button) return;
+  const supported = "Notification" in window;
+  button.textContent =
+    "Astra 提醒：" +
+    (!supported ? "浏览器不支持" : notifyOn ? "已开启" : "已关闭");
+  button.classList.toggle("selected", !!(notifyOn && supported));
+  button.disabled = !supported;
+}
+async function toggleNotify() {
+  if (!("Notification" in window)) {
+    notify("当前浏览器不支持通知。", true);
+    return;
+  }
+  if (Notification.permission === "granted") {
+    notifyOn = !notifyOn;
+  } else {
+    let permission = "default";
+    try {
+      permission = await Notification.requestPermission();
+    } catch (_) {}
+    if (permission !== "granted") {
+      notify("浏览器通知未授权，到货提醒无法弹出。", true);
+      return;
+    }
+    notifyOn = true;
+  }
+  try {
+    localStorage.setItem(notifyKey, notifyOn ? "on" : "off");
+  } catch (_) {}
+  renderNotifyBtn();
+  notify(notifyOn ? "Astra 到货提醒已开启。" : "Astra 到货提醒已关闭。");
+}
+function beep() {
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    audioCtx = audioCtx || new Ctor();
+    const osc = audioCtx.createOscillator(),
+      gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.frequency.value = 880;
+    gain.gain.value = 0.15;
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.4);
+  } catch (_) {}
+}
+function flashTitle(text) {
+  const original = "控制台 · ccodex-rotate";
+  document.title = text;
+  clearTimeout(titleTimer);
+  titleTimer = setTimeout(() => {
+    document.title = original;
+  }, 30000);
+}
+function connectEvents() {
+  let source;
+  try {
+    source = new EventSource("/api/events");
+  } catch (_) {
+    return;
+  }
+  source.onmessage = (event) => {
+    let message = "";
+    try {
+      message = JSON.parse(event.data).msg || event.data;
+    } catch (_) {
+      message = event.data;
+    }
+    notify("🟢 " + message);
+    flashTitle("🟢 " + message);
+    beep();
+    if (
+      notifyOn &&
+      "Notification" in window &&
+      Notification.permission === "granted"
+    ) {
+      try {
+        new Notification("ccodex-rotate", { body: message });
+      } catch (_) {}
+    }
+    refresh();
+  };
+  source.onerror = () => {};
+}
+$("notifyBtn").addEventListener("click", toggleNotify);
+renderNotifyBtn();
+connectEvents();
 // Schedule after completion so slow requests never overlap.
 async function poll() {
   await refresh();

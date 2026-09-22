@@ -62,6 +62,8 @@ type Config struct {
 	ProbeTimeoutSec int `json:"probe_timeout_seconds"`
 	// MaxProbesPerCollect caps how many nodes one collection round tries.
 	// 0 means "try nodes one at a time until one yields the target state".
+	// Bounded by default: a full 108-node sweep every 5 minutes burns
+	// through the account's routing budget and can close astra windows.
 	MaxProbesPerCollect int `json:"max_probes_per_collect"`
 	// CollectOnStart collects once as soon as account auth is available.
 	CollectOnStart bool `json:"collect_on_start"`
@@ -75,6 +77,17 @@ type Config struct {
 	CollectSuccessIntervalSec int `json:"collect_success_interval_seconds"`
 	// CollectRetryIntervalSec is the delay after a failed collection.
 	CollectRetryIntervalSec int `json:"collect_retry_interval_seconds"`
+	// HuntEnabled runs a lightweight rotating probe that catches "astra
+	// windows": upstream routing rotates every few minutes, so the hunter
+	// re-checks a few exits and moves forwarding onto one serving the
+	// target model. Each probe is one tiny request.
+	HuntEnabled bool `json:"hunt_enabled"`
+	// HuntIntervalSec is how often the hunter runs.
+	HuntIntervalSec int `json:"hunt_interval_seconds"`
+	// HuntNodes caps how many exits one hunt round probes.
+	HuntNodes int `json:"hunt_nodes"`
+	// NotifyEnabled pops a desktop notification when an astra window opens.
+	NotifyEnabled bool `json:"notify_enabled"`
 
 	// Selection is "auto" (fastest healthy) or "manual".
 	Selection string `json:"selection"`
@@ -134,10 +147,14 @@ func Default() Config {
 		ProbeModel:                "gpt-6-astra",
 		CollectModels:             []string{"codex-auto-review"},
 		ProbeTimeoutSec:           12,
-		MaxProbesPerCollect:       0,
+		MaxProbesPerCollect:       25,
 		CollectOnStart:            true,
 		CollectSuccessIntervalSec: 1800,
 		CollectRetryIntervalSec:   300,
+		HuntEnabled:               true,
+		HuntIntervalSec:           120,
+		HuntNodes:                 4,
+		NotifyEnabled:             true,
 		InjectNodeAffinity:        false,
 		Selection:                 "auto",
 		MaxRetries:                3,
@@ -272,6 +289,12 @@ func (c *Config) normalize(path string) error {
 	}
 	if c.CollectRetryIntervalSec <= 0 {
 		c.CollectRetryIntervalSec = 300
+	}
+	if c.HuntIntervalSec <= 0 {
+		c.HuntIntervalSec = 120
+	}
+	if c.HuntNodes <= 0 {
+		c.HuntNodes = 4
 	}
 	_ = path
 	return nil

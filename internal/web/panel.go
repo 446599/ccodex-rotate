@@ -5,8 +5,10 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
+	"sync"
 	"time"
 
 	"ccodex-rotate/internal/mihomo"
@@ -21,6 +23,7 @@ type Panel struct {
 	TargetLengths    []int
 	SuccessIntervalS int
 	RetryIntervalS   int
+	HuntNodes        int
 	Trigger          func()
 	SourcesAdd       func(kind string, lines []string) (int, error)
 	SourcesClear     func(kind string) error
@@ -28,6 +31,9 @@ type Panel struct {
 	Mgr              *mihomo.Manager
 	Eg               *mihomo.Egress
 	Proxy            *proxy.Server
+
+	mu   sync.Mutex
+	subs map[chan string]struct{}
 }
 
 // Handler builds the HTTP routes for the panel and JSON API.
@@ -41,6 +47,8 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/rotate", p.rotate)
 	mux.HandleFunc("/api/collect", p.collect)
 	mux.HandleFunc("/api/collect/stop", p.collectStop)
+	mux.HandleFunc("/api/hunt", p.hunt)
+	mux.HandleFunc("/api/events", p.events)
 	mux.HandleFunc("/api/scan", p.collect)
 	mux.HandleFunc("/api/injection", p.injection)
 	mux.HandleFunc("/api/force-model", p.forceModel)
@@ -68,6 +76,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 	lastCollect, lastCollectOK, nextCollect, collecting := p.Eg.CollectInfo()
 	ctried, ctotal := p.Eg.CollectProgress()
 	seenModel, seenLen := p.Eg.LastSeen()
+	lastHunt, lastHuntFound := p.Eg.HuntInfo()
 	reqs, errs, recent := p.Proxy.Stats()
 	m := map[string]any{
 		"listen":           p.Listen,
@@ -85,6 +94,8 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"collect_total":    ctotal,
 		"last_seen_model":  seenModel,
 		"last_seen_len":    seenLen,
+		"last_hunt":        lastHunt,
+		"last_hunt_found":  lastHuntFound,
 		"inject":           p.Proxy.InjectionEnabled(),
 		"force_model":      p.Proxy.ForceModel(),
 		"auth_ready":       p.Proxy.HasAuth(),
@@ -158,6 +169,78 @@ func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
 	stopped := p.Eg.StopCollect()
 	writeJSON(w, map[string]any{"stopped": stopped})
+}
+
+func (p *Panel) hunt(w http.ResponseWriter, r *http.Request) {
+	// One manual hunt round: probe a few exits for an "astra window".
+	n := p.HuntNodes
+	if n <= 0 {
+		n = 4
+	}
+	go p.Eg.Hunt(context.Background(), p.ProbeModel, n)
+	writeJSON(w, map[string]any{"started": true})
+}
+
+// Broadcast pushes a message to all /api/events subscribers without
+// blocking (slow readers drop messages).
+func (p *Panel) Broadcast(msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for ch := range p.subs {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
+func (p *Panel) sub(ch chan string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.subs == nil {
+		p.subs = map[chan string]struct{}{}
+	}
+	p.subs[ch] = struct{}{}
+}
+
+func (p *Panel) unsub(ch chan string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.subs, ch)
+}
+
+// events is a Server-Sent Events feed for astra-window notifications so an
+// open panel tab can pop a browser notification even between polls.
+func (p *Panel) events(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch := make(chan string, 8)
+	p.sub(ch)
+	defer p.unsub(ch)
+	fmt.Fprintf(w, ":ready\n\n")
+	fl.Flush()
+	beat := time.NewTicker(25 * time.Second)
+	defer beat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg := <-ch:
+			b, _ := json.Marshal(map[string]string{"msg": msg})
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			fl.Flush()
+		case <-beat.C:
+			fmt.Fprintf(w, ":ping\n\n")
+			fl.Flush()
+		}
+	}
 }
 
 func (p *Panel) forceModel(w http.ResponseWriter, r *http.Request) {
