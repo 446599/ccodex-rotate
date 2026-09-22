@@ -392,9 +392,11 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 	prefix, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	resp.Body.Close()
 	served := extractModel(prefix)
-	// Harvest cookies from every probe response, not just 292 ones, so the
-	// jar stays fresh even through dry windows.
-	if s.jar != nil {
+	// Harvest cookies: in frozen mode only a 292 response may update the
+	// jar (every response mints a unique cookie set; a 312 set must not
+	// overwrite the 292 set). Refresh-all mode keeps the old behavior.
+	if s.jar != nil && (s.cfg.CookieRefreshAll ||
+		(len(value) > 0 && s.lengthAllowed(len(value)))) {
 		s.jar.store(account, respCookies(resp))
 	}
 
@@ -546,6 +548,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if s.state.Exists(account, model) {
+				// A bundle existed but fully expired with no replacement:
+				// this is the case the expiry popup is for (Get can no
+				// longer see it, so it must be checked separately).
+				if s.onCredExpired != nil {
+					s.onCredExpired(model)
+				}
 			}
 		}
 
@@ -572,9 +581,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Learn the turn-state the upstream just issued, but only keep a value
 		// of an accepted length (otherwise a wrong-length value would suppress
-		// both collection and injection). Cookies are harvested from every
-		// live response into the jar regardless of length.
-		if s.jar != nil {
+		// both collection and injection). The cookie jar follows the same
+		// frozen rule: only a 292 response refreshes it.
+		learned := resp.Header.Get("X-Codex-Turn-State")
+		if s.jar != nil && (s.cfg.CookieRefreshAll ||
+			(learned != "" && s.lengthAllowed(len(learned)))) {
 			s.jar.store(account, respCookies(resp))
 		}
 		if s.state != nil && model != "" {
@@ -602,8 +613,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, copyErr := copyStream(w, io.TeeReader(resp.Body, cap))
 		resp.Body.Close()
 		served := extractModel(cap.buf)
-		// Learn whether this exit served the requested model (degradation), so
-		// the pool can prefer clean exits and switch away from degraded ones.
+		// Learn whether this exit served the requested model (marks the
+		// node degraded in the panel; never auto-switches).
 		if r.Method == http.MethodPost {
 			s.eg.Outcome(model, served)
 		}

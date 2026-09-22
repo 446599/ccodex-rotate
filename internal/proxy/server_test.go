@@ -391,13 +391,41 @@ func TestExhaustedRetriesReturnsLastStatus(t *testing.T) {
 	}
 }
 
-func TestCookiesHarvestedFromAnyResponse(t *testing.T) {
+func TestCookiesFrozenOn312(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A 312-style (non-target) response still sets cookies.
 		w.Header().Add("Set-Cookie", "SID=abc; Path=/")
 		w.Header().Add("Set-Cookie", "__cflb=xyz; Path=/")
 		w.Header().Set("X-Codex-Turn-State", strings.Repeat("B", 312))
 		w.Write([]byte(`{"model":"gpt-5.6-luna"}`))
+	}))
+	defer up.Close()
+
+	srv, _ := newTestServer(t, up, 0) // frozen mode by default
+	srv.authMu.Lock()
+	srv.auth, srv.account = "Bearer test", "acct"
+	srv.authMu.Unlock()
+
+	if _, _, _, _, err := srv.Probe(context.Background(), &http.Client{}, "gpt-6-astra"); err != nil {
+		t.Fatal(err)
+	}
+	// Frozen mode: a 312 response must not touch the jar, or it would
+	// overwrite the exact cookie set harvested with a 292.
+	if n, _ := srv.CookieInfo(); n != 0 {
+		t.Fatalf("312 must not populate the jar in frozen mode, got %d cookies", n)
+	}
+	// 312 must not be cached as a turn-state either.
+	if len(srv.StateSnapshot()) != 0 {
+		t.Fatalf("312 must not be cached as state")
+	}
+}
+
+func TestCookiesHarvestedFrom292(t *testing.T) {
+	state292 := strings.Repeat("A", 292)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "SID=abc; Path=/")
+		w.Header().Set("X-Codex-Turn-State", state292)
+		w.Write([]byte(`{"model":"gpt-6-astra"}`))
 	}))
 	defer up.Close()
 
@@ -409,16 +437,30 @@ func TestCookiesHarvestedFromAnyResponse(t *testing.T) {
 	if _, _, _, _, err := srv.Probe(context.Background(), &http.Client{}, "gpt-6-astra"); err != nil {
 		t.Fatal(err)
 	}
-	n, age := srv.CookieInfo()
-	if n != 2 {
-		t.Fatalf("expected 2 cookies harvested, got %d", n)
+	if n, _ := srv.CookieInfo(); n != 1 {
+		t.Fatalf("292 must populate the jar, got %d cookies", n)
 	}
-	if age < 0 {
-		t.Fatalf("expected fresh jar, got age %d", age)
+}
+
+func TestCookiesRefreshAllMode(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Set-Cookie", "SID=abc; Path=/")
+		w.Header().Set("X-Codex-Turn-State", strings.Repeat("B", 312))
+		w.Write([]byte(`{"model":"gpt-5.6-luna"}`))
+	}))
+	defer up.Close()
+
+	srv, _ := newTestServer(t, up, 0)
+	srv.cfg.CookieRefreshAll = true
+	srv.authMu.Lock()
+	srv.auth, srv.account = "Bearer test", "acct"
+	srv.authMu.Unlock()
+
+	if _, _, _, _, err := srv.Probe(context.Background(), &http.Client{}, "gpt-6-astra"); err != nil {
+		t.Fatal(err)
 	}
-	// 312 must not be cached as a turn-state, but cookies must be kept.
-	if len(srv.StateSnapshot()) != 0 {
-		t.Fatalf("312 must not be cached as state")
+	if n, _ := srv.CookieInfo(); n != 1 {
+		t.Fatalf("refresh-all mode must harvest from 312, got %d cookies", n)
 	}
 }
 
@@ -430,11 +472,14 @@ func TestFreshCookiesInjectedOnRequests(t *testing.T) {
 		gotCookie = append(gotCookie, r.Header.Get("Cookie"))
 		mu.Unlock()
 		w.Header().Add("Set-Cookie", "SID=abc; Path=/")
+		// Frozen mode only harvests from 292 responses.
+		w.Header().Set("X-Codex-Turn-State", strings.Repeat("A", 292))
 		w.Write([]byte("ok"))
 	}))
 	defer up.Close()
 
 	srv, _ := newTestServer(t, up, 0)
+	srv.cfg.StateLengths = []int{292}
 	front := httptest.NewServer(srv)
 	defer front.Close()
 

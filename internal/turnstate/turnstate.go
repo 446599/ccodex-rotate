@@ -96,6 +96,19 @@ func (s *Store) Age(account, model string) (time.Duration, bool) {
 	return time.Since(e.Created), true
 }
 
+// Exists reports whether any entry (live or expired) is stored for
+// account+model. Used to tell "bundle expired with no replacement" apart
+// from "never had a bundle".
+func (s *Store) Exists(account, model string) bool {
+	if model == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.entries[key(account, model)]
+	return ok
+}
+
 // Fresh returns the entry only if it was harvested within ttl (the 240s
 // credential window). An older entry still exists via Get but must not be
 // used for cookie-pinned injection anymore.

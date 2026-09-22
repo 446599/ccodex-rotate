@@ -33,6 +33,7 @@
   "state_lengths": [292, 332],
   "inject_node_affinity": false,
   "cookie_pin_enabled": true,
+  "cookie_refresh_all": false,
   "cred_ttl_seconds": 240,
   "cred_refresh_pause_seconds": 30,
   "model_aliases": {},

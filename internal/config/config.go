@@ -112,6 +112,11 @@ type Config struct {
 	// 292 turn-state and replays them as a Cookie header while the bundle
 	// is fresh (see CredTTLSeconds). Default true.
 	CookiePin bool `json:"cookie_pin_enabled"`
+	// CookieRefreshAll, when true, lets every upstream response (even 312s)
+	// refresh the cookie jar. Default false (frozen mode): only the exact
+	// cookie set arriving with a 292 is replayable, because every response
+	// mints a unique set and 312s must not overwrite the 292 set.
+	CookieRefreshAll bool `json:"cookie_refresh_all"`
 	// CredTTLSeconds is the freshness window of a harvested credential
 	// bundle (292 value + cookies). Inside the window both are injected;
 	// after it a newly harvested bundle replaces the old one, or an
