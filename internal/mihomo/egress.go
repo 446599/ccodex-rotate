@@ -31,6 +31,7 @@ type Egress struct {
 	mu            sync.Mutex
 	current       string
 	collecting    bool
+	loop          bool // a parallel loop (not one-shot) is running
 	lastCollect   time.Time
 	lastCollectOK bool
 	nextCollect   time.Time
@@ -43,6 +44,7 @@ type Egress struct {
 	huntCursor    int
 	collectLog    []CollectEvent
 	stopCollect   context.CancelFunc
+	stopLoop      context.CancelFunc
 	probe         ProbeFunc
 	manual        bool // forwarding exit manually pinned; collection ignores it
 	notify        func(string)
@@ -468,17 +470,72 @@ func (e *Egress) CollectParallel(ctx context.Context, model string, lanes int) b
 		return false
 	}
 	e.collecting = true
-	probe := e.probe
-	cctx, cancel := context.WithCancel(ctx)
-	e.stopCollect = cancel
 	e.mu.Unlock()
 	defer func() {
-		cancel()
 		e.mu.Lock()
 		e.collecting = false
 		e.stopCollect = nil
 		e.mu.Unlock()
 	}()
+	return e.collectParallelRound(ctx, model, lanes)
+}
+
+// CollectParallelLoop runs parallel rounds back-to-back with no wait between
+// them: as soon as a round harvests a bundle the next round starts, until
+// stopped (the 停止采集 button). Returns true if any round succeeded.
+func (e *Egress) CollectParallelLoop(ctx context.Context, model string, lanes int) bool {
+	e.mu.Lock()
+	if e.collecting {
+		e.mu.Unlock()
+		return false
+	}
+	e.collecting = true
+	e.loop = true
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.collecting = false
+		e.loop = false
+		e.stopCollect = nil
+		e.stopLoop = nil
+		e.mu.Unlock()
+	}()
+	lcctx, lcancel := context.WithCancel(ctx)
+	e.mu.Lock()
+	e.stopLoop = lcancel
+	e.mu.Unlock()
+	defer lcancel()
+	anyOK := false
+	for {
+		if lcctx.Err() != nil {
+			return anyOK
+		}
+		if e.collectParallelRound(lcctx, model, lanes) {
+			anyOK = true
+		}
+		if lcctx.Err() != nil {
+			return anyOK
+		}
+		// Pause between rounds to stay under upstream rate limits.
+		pause := time.Duration(e.m.cfg.LoopPauseSec) * time.Second
+		if pause < 0 {
+			pause = 0
+		}
+		select {
+		case <-lcctx.Done():
+			return anyOK
+		case <-time.After(pause):
+		}
+	}
+}
+
+func (e *Egress) collectParallelRound(ctx context.Context, model string, lanes int) bool {
+	probe := e.probe
+	cctx, cancel := context.WithCancel(ctx)
+	e.mu.Lock()
+	e.stopCollect = cancel
+	e.mu.Unlock()
+	defer cancel()
 	ctx = cctx
 
 	if err := e.RefreshNodes(ctx); err != nil {
@@ -623,11 +680,30 @@ func (e *Egress) CollectParallel(ctx context.Context, model string, lanes int) b
 func (e *Egress) StopCollect() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.stopCollect == nil {
-		return false
+	stopped := false
+	if e.stopCollect != nil {
+		e.stopCollect()
+		stopped = true
 	}
-	e.stopCollect()
-	return true
+	if e.stopLoop != nil {
+		e.stopLoop()
+		stopped = true
+	}
+	return stopped
+}
+
+// Looping reports whether a parallel loop is running (vs one-shot).
+func (e *Egress) Looping() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.loop
+}
+
+// Collecting reports whether any collection round is running.
+func (e *Egress) Collecting() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.collecting
 }
 
 // HuntInfo returns the last hunt time and the exit most recently found

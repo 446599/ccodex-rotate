@@ -109,6 +109,17 @@ func (s *Store) Exists(account, model string) bool {
 	return ok
 }
 
+// Drop deletes the entry for account+model, voiding a degraded bundle so it
+// can never be injected again. The next request re-triggers collection.
+func (s *Store) Drop(account, model string) {
+	if model == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, key(account, model))
+}
+
 // Fresh returns the entry only if it was harvested within ttl (the 240s
 // credential window). An older entry still exists via Get but must not be
 // used for cookie-pinned injection anymore.

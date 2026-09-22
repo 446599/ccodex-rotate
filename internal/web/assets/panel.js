@@ -99,6 +99,12 @@ function renderControls(s) {
   $("rotateBtn").title = s.manual ? "请先恢复自动，再切换节点" : "切换转发出口";
   $("collectBtn").disabled = !!s.collecting;
   $("stopBtn").hidden = !s.collecting;
+  $("collectParBtn").textContent = s.looping
+    ? "并行循环：已开启"
+    : "并行循环：已关闭";
+  $("collectParBtn").setAttribute("aria-pressed", String(!!s.looping));
+  $("collectParBtn").classList.toggle("selected", !!s.looping);
+  $("collectParBtn").disabled = false;
 }
 function tick() {
   document.querySelectorAll("[data-exp]").forEach((el) => {
@@ -402,9 +408,14 @@ document.querySelectorAll("[data-action]").forEach((button) =>
   button.addEventListener("click", () => {
     const path = button.dataset.action;
     const messages = {
-      "/api/collect": "已请求采集，请稍候查看进度。",
+      "/api/collect": (r) =>
+        r.started
+          ? "已开始 " + (r.lanes || "") + " 路并行采集，请稍候查看进度。"
+          : "正忙（采集/猎手进行中），稍后再点。",
       "/api/collect-parallel": (r) =>
-        "已开始 " + (r.lanes || "") + " 路并行采集，请稍候查看进度。",
+        "已开始 " +
+        (r.lanes || "") +
+        " 路循环并行采集（采到即开下一轮），点「停止采集」结束。",
       "/api/collect/stop": (r) =>
         r.stopped ? "本轮采集已停止。" : "当前没有正在进行的采集。",
       "/api/rotate": (r) =>
@@ -422,6 +433,22 @@ $("injBtn").addEventListener("click", () => {
       { enabled: !status.inject },
       "已更新凭据注入设置。",
     );
+});
+$("collectParBtn").addEventListener("click", () => {
+  if (!status) return;
+  if (status.looping) {
+    mutate($("collectParBtn"), "/api/collect/stop", {}, "并行循环已关闭。");
+  } else {
+    mutate(
+      $("collectParBtn"),
+      "/api/collect-parallel",
+      {},
+      (r) =>
+        r && r.started
+          ? "并行循环已开启：采到即开下一轮。"
+          : "正忙（采集/猎手进行中），稍后再点。",
+    );
+  }
 });
 $("list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-pin]");
@@ -681,6 +708,26 @@ function connectEvents() {
 $("notifyBtn").addEventListener("click", toggleNotify);
 renderNotifyBtn();
 connectEvents();
+// Single-page navigation: only one section is visible at a time so nodes
+// and logs each get their own page. Hash-based: #nodes deep-links.
+const PAGES = ["overview", "credentials", "sources", "nodes", "activity"];
+function showPage(name) {
+  if (!PAGES.includes(name)) name = "overview";
+  for (const p of PAGES) {
+    const el = document.getElementById(p);
+    if (el) el.hidden = p !== name;
+  }
+  document.querySelectorAll("aside nav a").forEach((a) => {
+    const target = (a.getAttribute("href") || "").replace(/^#/, "");
+    if (!PAGES.includes(target)) return;
+    if (target === name) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+}
+window.addEventListener("hashchange", () =>
+  showPage(window.location.hash.replace(/^#/, "")),
+);
+showPage(window.location.hash.replace(/^#/, ""));
 // Schedule after completion so slow requests never overlap.
 async function poll() {
   await refresh();

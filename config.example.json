@@ -35,6 +35,7 @@
   "cookie_pin_enabled": true,
   "cookie_refresh_all": false,
   "collect_lanes": 10,
+  "loop_pause_seconds": 10,
   "cred_ttl_seconds": 240,
   "cred_refresh_pause_seconds": 30,
   "model_aliases": {},

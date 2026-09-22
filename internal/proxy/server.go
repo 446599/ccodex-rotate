@@ -220,6 +220,18 @@ func (j *cookieJar) info() (int, int64) {
 	return len(names), int64(time.Since(newest).Seconds())
 }
 
+// drop deletes the account's cookies, voiding them together with a degraded
+// bundle. Fresh cookies arrive with the next 292.
+func (j *cookieJar) drop(account string) {
+	if account == "" {
+		return
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	delete(j.cookies, account)
+	delete(j.at, account)
+}
+
 // SetOnAuth registers a callback fired once, the first time account auth is
 // observed. It is used to kick off a full node collection scan immediately.
 func (s *Server) SetOnAuth(f func()) { s.onAuth = f }
@@ -617,6 +629,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// node degraded in the panel; never auto-switches).
 		if r.Method == http.MethodPost {
 			s.eg.Outcome(model, served)
+			// A degraded bundle is void: drop the turn-state and its
+			// cookies so nothing stale is ever injected again. The next
+			// request re-triggers collection automatically.
+			if served != "" && model != "" && served != model {
+				s.logf("bundle voided: %s served %s, dropped", model, served)
+				if s.state != nil {
+					s.state.Drop(account, model)
+				}
+				if s.jar != nil {
+					s.jar.drop(account)
+				}
+			}
 		}
 		s.record(Record{
 			Time: time.Now(), Method: r.Method, Path: r.URL.Path,

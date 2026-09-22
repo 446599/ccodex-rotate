@@ -19,6 +19,7 @@ import (
 type Panel struct {
 	Listen           string
 	Upstream         string
+	Version          string
 	ProbeModel       string
 	TargetLengths    []int
 	SuccessIntervalS int
@@ -67,6 +68,7 @@ func (p *Panel) page(w http.ResponseWriter, r *http.Request) {
 	_ = tpl.Execute(w, map[string]any{
 		"Listen":   p.Listen,
 		"Upstream": p.Upstream,
+		"Version":  p.Version,
 	})
 }
 
@@ -93,6 +95,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"failed":           failed,
 		"total":            total,
 		"collecting":       collecting,
+		"looping":          p.Eg.Looping(),
 		"collect_tried":    ctried,
 		"collect_total":    ctotal,
 		"last_seen_model":  seenModel,
@@ -163,13 +166,18 @@ func (p *Panel) rotate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
-	// Trigger the collection loop (or run a one-off collection if not wired).
-	if p.Trigger != nil {
-		p.Trigger()
-	} else {
-		go p.Eg.Collect(context.Background(), p.ProbeModel)
+	// The default fetch is parallel: one round over up to CollectLanes
+	// exits, each with a fresh session per probe.
+	n := p.CollectLanes
+	if n <= 0 {
+		n = 10
 	}
-	writeJSON(w, map[string]any{"started": true})
+	if p.Eg.Collecting() {
+		writeJSON(w, map[string]any{"started": false, "busy": true, "lanes": n})
+		return
+	}
+	go p.Eg.CollectParallel(context.Background(), p.ProbeModel, n)
+	writeJSON(w, map[string]any{"started": true, "lanes": n})
 }
 
 func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
@@ -178,13 +186,18 @@ func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Panel) collectParallel(w http.ResponseWriter, r *http.Request) {
-	// One manual parallel round: probe up to CollectLanes exits at once,
-	// each on its own lane with a fresh session per probe.
+	// Loop mode: parallel rounds back-to-back with no wait between them;
+	// a harvested bundle is immediately followed by the next round, until
+	// stopped. Each probe uses a fresh session.
 	n := p.CollectLanes
 	if n <= 0 {
 		n = 10
 	}
-	go p.Eg.CollectParallel(context.Background(), p.ProbeModel, n)
+	if p.Eg.Collecting() {
+		writeJSON(w, map[string]any{"started": false, "busy": true, "lanes": n})
+		return
+	}
+	go p.Eg.CollectParallelLoop(context.Background(), p.ProbeModel, n)
 	writeJSON(w, map[string]any{"started": true, "lanes": n})
 }
 
@@ -193,6 +206,10 @@ func (p *Panel) hunt(w http.ResponseWriter, r *http.Request) {
 	n := p.HuntNodes
 	if n <= 0 {
 		n = 4
+	}
+	if p.Eg.Collecting() {
+		writeJSON(w, map[string]any{"started": false, "busy": true})
+		return
 	}
 	go p.Eg.Hunt(context.Background(), p.ProbeModel, n)
 	writeJSON(w, map[string]any{"started": true})

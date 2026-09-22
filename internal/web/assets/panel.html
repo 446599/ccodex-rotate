@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>控制台 · ccodex-rotate</title>
-    <link rel="stylesheet" href="/panel/assets/panel.css" />
-    <script src="/panel/assets/panel.js" defer></script>
+    <link rel="stylesheet" href="/panel/assets/panel.css?v={{.Version}}" />
+    <script src="/panel/assets/panel.js?v={{.Version}}" defer></script>
   </head>
   <body>
     <a class="skip" href="#main">跳到主要内容</a>
@@ -26,10 +26,11 @@
     <div class="shell">
       <aside>
         <div class="nav-label">工作空间</div>
-        <nav aria-label="控制台导航">
-          <a href="#overview">运行概览</a><a href="#credentials">凭据管理</a
-          ><a href="#sources">订阅与节点</a><a href="#activity">运行日志</a>
-        </nav>
+          <nav aria-label="控制台导航">
+            <a href="#overview">运行概览</a><a href="#credentials">凭据管理</a
+            ><a href="#sources">订阅管理</a><a href="#nodes">节点列表</a
+            ><a href="#activity">运行日志</a>
+          </nav>
         <div class="sidebar-note">
           <span class="dot"></span> 本地运行
           <p>独立代理通道<br />不修改系统代理</p>
@@ -125,11 +126,12 @@
               <div class="actions">
                 <button id="collectBtn" data-action="/api/collect">
                   立即采集</button
-                ><button
+                >                <button
                   id="collectParBtn"
-                  data-action="/api/collect-parallel"
+                  aria-pressed="false"
+                  disabled
                 >
-                  并行获取凭证</button
+                  并行循环：正在读取</button
                 ><button
                   id="stopBtn"
                   class="danger"
@@ -175,7 +177,7 @@
         <section id="sources">
           <div class="section-title">
             <div>
-              <h2>订阅与节点</h2>
+              <h2>订阅管理</h2>
               <p class="muted">
                 添加后即时生效。支持订阅地址和常见节点分享链接。
               </p>
@@ -227,6 +229,16 @@
               </div>
               <p class="form-result" id="nodeResult" role="status"></p>
             </form>
+          </div>
+        </section>
+        <section id="nodes">
+          <div class="section-title">
+            <div>
+              <h2>节点列表</h2>
+              <p class="muted">
+                降智 / 不降智 / 未测一目了然。点「用于转发」固定出口。
+              </p>
+            </div>
           </div>
           <div class="card">
             <div class="section-heading">

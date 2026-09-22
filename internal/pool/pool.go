@@ -49,8 +49,8 @@ func New(path string) *Pool {
 	p := &Pool{
 		entries:     map[string]*Entry{},
 		path:        path,
-		failTTL:     90 * time.Second,
-		blockTTL:    300 * time.Second,
+		failTTL:     60 * time.Second,
+		blockTTL:    60 * time.Second,
 		degradedTTL: 10 * time.Minute,
 	}
 	p.load()

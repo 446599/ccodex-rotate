@@ -51,3 +51,20 @@ func TestPutRotatesBundle(t *testing.T) {
 		t.Fatalf("cookies not rotated: %+v", e.Cookies)
 	}
 }
+
+func TestDropVoidsBundle(t *testing.T) {
+	s := New(time.Hour)
+	s.PutFull("a", "m", "n1", "value292", []string{"c=v"})
+	if !s.Exists("a", "m") {
+		t.Fatal("expected entry to exist")
+	}
+	s.Drop("a", "m")
+	if s.Exists("a", "m") {
+		t.Fatal("dropped entry must not exist")
+	}
+	if _, ok := s.Get("a", "m"); ok {
+		t.Fatal("dropped entry must not be returned")
+	}
+	// Dropping a missing entry is a no-op.
+	s.Drop("a", "m")
+}

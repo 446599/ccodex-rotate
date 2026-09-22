@@ -33,7 +33,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.4.10"
+const version = "0.5.0"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -388,6 +388,7 @@ func runServe(cfgPath, codexHome string) {
 
 	panel := &web.Panel{
 		Listen: cfg.Listen, Upstream: cfg.UpstreamBase,
+		Version:    version,
 		ProbeModel: cfg.ProbeModel, TargetLengths: cfg.StateLengths,
 		SuccessIntervalS: cfg.CollectSuccessIntervalSec, RetryIntervalS: cfg.CollectRetryIntervalSec,
 		HuntNodes:    cfg.HuntNodes,

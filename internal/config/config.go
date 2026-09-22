@@ -70,6 +70,9 @@ type Config struct {
 	// can probe that many exits at once without sharing one group
 	// selection. Lane i uses CollectPort+i. Default 10.
 	CollectLanes int `json:"collect_lanes"`
+	// LoopPauseSec is the pause between parallel-loop rounds, to stay under
+	// upstream rate limits (tight loops earn HTTP 429s). Default 10.
+	LoopPauseSec int `json:"loop_pause_seconds"`
 	// CollectOnStart collects once as soon as account auth is available.
 	CollectOnStart bool `json:"collect_on_start"`
 	// AutoCollect starts collection automatically when a target-model request
@@ -171,6 +174,7 @@ func Default() Config {
 		ProbeTimeoutSec:           12,
 		MaxProbesPerCollect:       25,
 		CollectLanes:              10,
+		LoopPauseSec:              10,
 		CollectOnStart:            true,
 		CollectSuccessIntervalSec: 1800,
 		CollectRetryIntervalSec:   300,
@@ -321,6 +325,9 @@ func (c *Config) normalize(path string) error {
 	}
 	if c.CollectLanes > 32 {
 		c.CollectLanes = 32
+	}
+	if c.LoopPauseSec <= 0 {
+		c.LoopPauseSec = 10
 	}
 	if c.CollectSuccessIntervalSec <= 0 {
 		c.CollectSuccessIntervalSec = 1800
