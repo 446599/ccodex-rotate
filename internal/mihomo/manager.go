@@ -493,7 +493,11 @@ func (m *Manager) PrepareProviders(ctx context.Context) ([]Provider, error) {
 				if st, statErr := os.Stat(dst); statErr == nil && st.Size() > 0 {
 					m.warn(fmt.Sprintf("subscription %d download failed (%v); using cached copy", i+1, err))
 				} else {
-					return nil, fmt.Errorf("download subscription %d (%s): %w", i+1, subscription.Redact(s), err)
+					// No usable copy: skip this source instead of killing
+					// startup; a single dead subscription must not take down
+					// the proxy when other sources are fine.
+					m.warn(fmt.Sprintf("subscription %d download failed (%v); skipping (no cache)", i+1, err))
+					continue
 				}
 			}
 			out = append(out, Provider{Name: name, Path: dst})
@@ -520,6 +524,9 @@ func (m *Manager) PrepareProviders(ctx context.Context) ([]Provider, error) {
 			}
 			out = append(out, Provider{Name: "custom", Path: dst})
 		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no usable providers: all subscriptions failed and no custom nodes")
 	}
 	return out, nil
 }

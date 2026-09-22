@@ -33,7 +33,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.4.5"
+const version = "0.4.6"
 
 func main() {
 	log.SetFlags(log.Ltime)
