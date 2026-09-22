@@ -24,6 +24,7 @@ type Panel struct {
 	SuccessIntervalS int
 	RetryIntervalS   int
 	HuntNodes        int
+	CollectLanes     int
 	Trigger          func()
 	SourcesAdd       func(kind string, lines []string) (int, error)
 	SourcesClear     func(kind string) error
@@ -47,6 +48,7 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/rotate", p.rotate)
 	mux.HandleFunc("/api/collect", p.collect)
 	mux.HandleFunc("/api/collect/stop", p.collectStop)
+	mux.HandleFunc("/api/collect-parallel", p.collectParallel)
 	mux.HandleFunc("/api/hunt", p.hunt)
 	mux.HandleFunc("/api/events", p.events)
 	mux.HandleFunc("/api/scan", p.collect)
@@ -173,6 +175,17 @@ func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
 	stopped := p.Eg.StopCollect()
 	writeJSON(w, map[string]any{"stopped": stopped})
+}
+
+func (p *Panel) collectParallel(w http.ResponseWriter, r *http.Request) {
+	// One manual parallel round: probe up to CollectLanes exits at once,
+	// each on its own lane with a fresh session per probe.
+	n := p.CollectLanes
+	if n <= 0 {
+		n = 10
+	}
+	go p.Eg.CollectParallel(context.Background(), p.ProbeModel, n)
+	writeJSON(w, map[string]any{"started": true, "lanes": n})
 }
 
 func (p *Panel) hunt(w http.ResponseWriter, r *http.Request) {

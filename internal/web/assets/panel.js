@@ -403,6 +403,8 @@ document.querySelectorAll("[data-action]").forEach((button) =>
     const path = button.dataset.action;
     const messages = {
       "/api/collect": "已请求采集，请稍候查看进度。",
+      "/api/collect-parallel": (r) =>
+        "已开始 " + (r.lanes || "") + " 路并行采集，请稍候查看进度。",
       "/api/collect/stop": (r) =>
         r.stopped ? "本轮采集已停止。" : "当前没有正在进行的采集。",
       "/api/rotate": (r) =>

@@ -65,6 +65,11 @@ type Config struct {
 	// Bounded by default: a full 108-node sweep every 5 minutes burns
 	// through the account's routing budget and can close astra windows.
 	MaxProbesPerCollect int `json:"max_probes_per_collect"`
+	// CollectLanes is how many independent collection lanes exist (each a
+	// dedicated mihomo select group + inbound port), so parallel collection
+	// can probe that many exits at once without sharing one group
+	// selection. Lane i uses CollectPort+i. Default 10.
+	CollectLanes int `json:"collect_lanes"`
 	// CollectOnStart collects once as soon as account auth is available.
 	CollectOnStart bool `json:"collect_on_start"`
 	// AutoCollect starts collection automatically when a target-model request
@@ -165,6 +170,7 @@ func Default() Config {
 		CollectModels:             []string{"codex-auto-review"},
 		ProbeTimeoutSec:           12,
 		MaxProbesPerCollect:       25,
+		CollectLanes:              10,
 		CollectOnStart:            true,
 		CollectSuccessIntervalSec: 1800,
 		CollectRetryIntervalSec:   300,
@@ -309,6 +315,12 @@ func (c *Config) normalize(path string) error {
 	}
 	if c.MaxProbesPerCollect < 0 {
 		c.MaxProbesPerCollect = 0
+	}
+	if c.CollectLanes <= 0 {
+		c.CollectLanes = 10
+	}
+	if c.CollectLanes > 32 {
+		c.CollectLanes = 32
 	}
 	if c.CollectSuccessIntervalSec <= 0 {
 		c.CollectSuccessIntervalSec = 1800

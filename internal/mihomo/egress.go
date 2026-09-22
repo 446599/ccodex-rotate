@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ccodex-rotate/internal/pool"
@@ -105,6 +106,20 @@ func (e *Egress) Client(timeout time.Duration) *http.Client {
 // (COLLECT group), independent of the forwarding exit.
 func (e *Egress) collectClient(timeout time.Duration) *http.Client {
 	u, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", e.m.cfg.CollectPort))
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:              http.ProxyURL(u),
+			DisableKeepAlives:  true,
+			DisableCompression: true,
+		},
+	}
+}
+
+// collectClientFor returns a client bound to one parallel-collection lane
+// inbound, so each worker's traffic follows only its own lane selection.
+func (e *Egress) collectClientFor(port int, timeout time.Duration) *http.Client {
+	u, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -438,6 +453,170 @@ func (e *Egress) LastSeenLength() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.lastSeenLen
+}
+
+// CollectParallel probes exits with up to lanes concurrent workers, each on
+// its own dedicated lane (select group + inbound port) so workers never
+// share one group selection (which would scramble exit attribution).
+// Every probe is a fresh store:false request (new session, nothing reused).
+// It stops as soon as one worker returns an accepted length (e.g. 292).
+// Returns true on success.
+func (e *Egress) CollectParallel(ctx context.Context, model string, lanes int) bool {
+	e.mu.Lock()
+	if e.collecting {
+		e.mu.Unlock()
+		return false
+	}
+	e.collecting = true
+	probe := e.probe
+	cctx, cancel := context.WithCancel(ctx)
+	e.stopCollect = cancel
+	e.mu.Unlock()
+	defer func() {
+		cancel()
+		e.mu.Lock()
+		e.collecting = false
+		e.stopCollect = nil
+		e.mu.Unlock()
+	}()
+	ctx = cctx
+
+	if err := e.RefreshNodes(ctx); err != nil {
+		e.finishCollect(false)
+		return false
+	}
+	if _, err := e.m.NodeNames(ctx); err != nil {
+		e.finishCollect(false)
+		return false
+	}
+	var candidates, cooling []string
+	for _, ent := range e.p.Snapshot() {
+		if ent.State == pool.Failed {
+			cooling = append(cooling, ent.Name)
+			continue
+		}
+		candidates = append(candidates, ent.Name)
+	}
+	if len(candidates) == 0 {
+		candidates = cooling
+	}
+	names := candidates
+	e.logEvent(model, fmt.Sprintf("开始并行采集：候选 %d 个（跳过 %d 个冷却节点）", len(names), len(cooling)))
+
+	e.mu.Lock()
+	e.collectTotal = len(names)
+	e.collectTried = 0
+	e.mu.Unlock()
+
+	if probe == nil {
+		probe = e.reachabilityProbe
+	}
+	timeout := time.Duration(e.m.cfg.ProbeTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	targets := e.targetLengths()
+	max := e.m.cfg.MaxProbesPerCollect
+	if lanes <= 0 {
+		lanes = 1
+	}
+	if lanes > len(names) {
+		lanes = len(names)
+	}
+	if lanes <= 0 {
+		e.finishCollect(false)
+		return false
+	}
+
+	jobs := make(chan string)
+	var tried atomic.Int64
+	// Feed candidates, capped at max total probes.
+	go func() {
+		defer close(jobs)
+		for _, name := range names {
+			if max > 0 && int(tried.Load()) >= max {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- name:
+			}
+		}
+	}()
+
+	var winner sync.Once
+	won := atomic.Bool{}
+	var wg sync.WaitGroup
+	for i := 1; i <= lanes; i++ {
+		wg.Add(1)
+		go func(lane int) {
+			defer wg.Done()
+			group := LaneGroup(lane)
+			client := e.collectClientFor(LanePort(e.m.cfg.CollectPort, lane), timeout)
+			for name := range jobs {
+				if ctx.Err() != nil || won.Load() {
+					return
+				}
+				if max > 0 && int(tried.Add(1)) > max {
+					return
+				}
+				if err := e.m.Select(ctx, group, name); err != nil {
+					continue
+				}
+				length, reachable, _, served, err := probe(ctx, client, model)
+				e.mu.Lock()
+				e.collectTried++
+				if length > 0 {
+					e.lastSeenLen = length
+					e.lastSeenModel = model
+				}
+				e.mu.Unlock()
+				if served != "" {
+					if s := e.m.cfg.ProbeModel; served != model && served != s {
+						e.p.MarkDegraded(name)
+					} else if served == model {
+						e.p.MarkClean(name)
+					}
+				}
+				switch {
+				case err == nil && length > 0 && (len(targets) == 0 || targets[length]):
+					e.p.MarkOK(name, 0)
+					svc := served
+					if svc == "" {
+						svc = "未知模型"
+					}
+					e.logEvent(model, fmt.Sprintf("并行采到 %d 字符 @ %s（实际 %s）", length, name, svc))
+					if served == model && model == e.m.cfg.ProbeModel {
+						e.fireNotify("Astra 可用（并行采集）：" + name)
+					}
+					winner.Do(func() {
+						won.Store(true)
+						e.finishCollect(true)
+						cancel()
+					})
+					return
+				case err != nil:
+					e.p.MarkFail(name, "error")
+				case reachable:
+					e.p.MarkReachable(name)
+				default:
+					e.p.MarkFail(name, "blocked")
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if won.Load() {
+		return true
+	}
+	e.finishCollect(false)
+	if ctx.Err() != nil {
+		e.logEvent(model, "并行采集已停止")
+	} else {
+		e.logEvent(model, "本轮未采到合格凭据")
+	}
+	return false
 }
 
 // StopCollect interrupts an in-progress collection round.
