@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,7 +33,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.4.4"
+const version = "0.4.5"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -491,6 +492,24 @@ func runServe(cfgPath, codexHome string) {
 		}
 		panel.Broadcast(msg)
 	})
+	// Credential-bundle expiry: after the freshness window with no new
+	// bundle, pop a notification (same 10-minute cooldown as astra alerts).
+	srv.SetOnCredExpired(func(model string) {
+		notifyMu.Lock()
+		cooled := time.Since(lastNotify) < 10*time.Minute
+		if !cooled {
+			lastNotify = time.Now()
+		}
+		notifyMu.Unlock()
+		if cooled {
+			return
+		}
+		msg := "292 凭据已过期（>240秒）且暂无新凭据，采集中…"
+		if cfg.NotifyEnabled {
+			desktopNotify("ccodex-rotate", msg)
+		}
+		panel.Broadcast(msg)
+	})
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: root}
 
 	wired := false
@@ -665,6 +684,12 @@ func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trig
 		if ok {
 			wait = time.Duration(cfg.CollectSuccessIntervalSec) * time.Second
 			log.Printf("turn-state for %s collected; next collection in %s", need, wait)
+			// A fresh 292 (+cookies) only stays valid ~240s: pause briefly,
+			// then collect again so the bundle is continuously refreshed.
+			if slices.Contains(cfg.StateLengths, eg.LastSeenLength()) {
+				wait = time.Duration(cfg.CredRefreshPauseSec) * time.Second
+				log.Printf("292 bundle harvested; refreshing again in %s", wait)
+			}
 		} else {
 			log.Printf("no turn-state for %s this round; retrying in %s", need, wait)
 		}

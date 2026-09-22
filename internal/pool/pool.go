@@ -27,6 +27,7 @@ type Entry struct {
 	State      string    `json:"state"`
 	Degraded   bool      `json:"degraded"` // served a different model than requested
 	DegradedAt time.Time `json:"degraded_at,omitempty"`
+	Tested     bool      `json:"tested"` // ever observed serving the requested model
 	FailUntil  time.Time `json:"fail_until"`
 	LastOK     time.Time `json:"last_ok"`
 	Reason     string    `json:"reason,omitempty"`
@@ -137,6 +138,7 @@ func (p *Pool) MarkClean(name string) {
 	e := p.ensure(name)
 	e.Degraded = false
 	e.DegradedAt = time.Time{}
+	e.Tested = true
 	p.saveLocked()
 }
 

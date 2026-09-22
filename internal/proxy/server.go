@@ -50,6 +50,7 @@ type Record struct {
 	ServedModel string    `json:"served_model,omitempty"`
 	Quota       string    `json:"quota,omitempty"`
 	Injected    bool      `json:"injected"`
+	Cookie      bool      `json:"cookie,omitempty"`
 	Attempts    int       `json:"attempts"`
 	Millis      int64     `json:"millis"`
 }
@@ -98,6 +99,36 @@ type Server struct {
 	lastNeed   map[string]time.Time
 	onNeed     func(model string)
 	collectSet map[string]bool
+
+	onCredExpired func(model string)
+}
+
+// SetOnCredExpired registers a callback fired when a live request arrives
+// with a credential bundle older than the freshness window and no newer
+// bundle has replaced it yet.
+func (s *Server) SetOnCredExpired(f func(model string)) { s.onCredExpired = f }
+
+// CredTTL is the freshness window of a harvested bundle (292 + cookies).
+func (s *Server) CredTTL() time.Duration {
+	if s.cfg.CredTTLSeconds <= 0 {
+		return 240 * time.Second
+	}
+	return time.Duration(s.cfg.CredTTLSeconds) * time.Second
+}
+
+// respCookies extracts upstream Set-Cookie name=value pairs for replay.
+func respCookies(resp *http.Response) []string {
+	if resp == nil {
+		return nil
+	}
+	var out []string
+	for _, c := range resp.Cookies() {
+		if c.Name == "" || c.Value == "" {
+			continue
+		}
+		out = append(out, c.Name+"="+c.Value)
+	}
+	return out
 }
 
 // SetOnAuth registers a callback fired once, the first time account auth is
@@ -284,7 +315,7 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 		if s.eg != nil {
 			node = s.eg.Current()
 		}
-		s.state.Put(account, model, node, value)
+		s.state.PutFull(account, model, node, value, respCookies(resp))
 	}
 	return length, true, value, served, nil
 }
@@ -391,6 +422,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	attempts := 0
 	injectedAny := false
+	cookieAny := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		attempts = attempt + 1
 		req, err := http.NewRequestWithContext(ctx, r.Method, target, bytes.NewReader(body))
@@ -402,7 +434,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.Host = "" // let net/http set from URL
 		req.ContentLength = int64(len(body))
 
-		// Inject a cached turn-state (can be toggled off at runtime).
+		// Inject a cached turn-state (can be toggled off at runtime), plus
+		// the cookies harvested with it while the bundle is fresh.
 		if s.inject.Load() && s.state != nil && model != "" {
 			if e, ok := s.state.Get(account, model); ok && s.lengthAllowed(e.Length) {
 				inject := true
@@ -413,6 +446,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					req.Header.Set("X-Codex-Turn-State", e.Value)
 					s.state.Hit(account, model)
 					injectedAny = true
+					if fe, fresh := s.state.Fresh(account, model, s.CredTTL()); fresh {
+						if s.cfg.CookiePin && len(fe.Cookies) > 0 {
+							req.Header.Set("Cookie", strings.Join(fe.Cookies, "; "))
+							cookieAny = true
+						}
+					} else if s.onCredExpired != nil {
+						s.onCredExpired(model)
+					}
 				}
 			}
 		}
@@ -431,10 +472,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Learn the turn-state the upstream just issued, but only keep a value
 		// of an accepted length (otherwise a wrong-length value would suppress
-		// both collection and injection).
+		// both collection and injection). Cookies arriving with a 292 are
+		// harvested into the same bundle.
 		if s.state != nil && model != "" {
 			if v := resp.Header.Get("X-Codex-Turn-State"); v != "" && s.lengthAllowed(len(v)) {
-				s.state.Put(account, model, s.eg.Current(), v)
+				s.state.PutFull(account, model, s.eg.Current(), v, respCookies(resp))
 			}
 		}
 		if retriableStatus(resp.StatusCode) && attempt+1 < maxAttempts {
@@ -467,7 +509,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Status: resp.StatusCode, Node: s.eg.Current(), Model: model,
 			ServedModel: served,
 			Quota:       resp.Header.Get("x-codex-primary-used-percent"),
-			Injected:    injectedAny, Attempts: attempts,
+			Injected:    injectedAny, Cookie: cookieAny, Attempts: attempts,
 			Millis: time.Since(start).Milliseconds(),
 		})
 		if copyErr != nil {

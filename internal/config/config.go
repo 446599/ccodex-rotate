@@ -108,6 +108,18 @@ type Config struct {
 	// InjectNodeAffinity, when true, only injects a state through the node that
 	// produced it. Default false: 292 may be injected across nodes.
 	InjectNodeAffinity bool `json:"inject_node_affinity"`
+	// CookiePin, when true, harvests upstream Set-Cookie pairs alongside a
+	// 292 turn-state and replays them as a Cookie header while the bundle
+	// is fresh (see CredTTLSeconds). Default true.
+	CookiePin bool `json:"cookie_pin_enabled"`
+	// CredTTLSeconds is the freshness window of a harvested credential
+	// bundle (292 value + cookies). Inside the window both are injected;
+	// after it a newly harvested bundle replaces the old one, or an
+	// expiry notification fires if none arrived. Default 240.
+	CredTTLSeconds int `json:"cred_ttl_seconds"`
+	// CredRefreshPauseSec is the pause after a successful 292 collection
+	// before collecting again, keeping the bundle fresh. Default 30.
+	CredRefreshPauseSec int `json:"cred_refresh_pause_seconds"`
 	// ModelAliases maps a requested model name to its canonical name so
 	// turn-state keys, probing and injection agree on one identifier.
 	ModelAliases map[string]string `json:"model_aliases"`
@@ -156,6 +168,9 @@ func Default() Config {
 		HuntNodes:                 4,
 		NotifyEnabled:             true,
 		InjectNodeAffinity:        false,
+		CookiePin:                 true,
+		CredTTLSeconds:            240,
+		CredRefreshPauseSec:       30,
 		Selection:                 "auto",
 		MaxRetries:                3,
 		MaxBodyMiB:                128,
@@ -274,6 +289,12 @@ func (c *Config) normalize(path string) error {
 	}
 	if c.StateTTLSeconds <= 0 {
 		c.StateTTLSeconds = 3600
+	}
+	if c.CredTTLSeconds <= 0 {
+		c.CredTTLSeconds = 240
+	}
+	if c.CredRefreshPauseSec <= 0 {
+		c.CredRefreshPauseSec = 30
 	}
 	if c.ProbeModel == "" {
 		c.ProbeModel = "gpt-6-astra"

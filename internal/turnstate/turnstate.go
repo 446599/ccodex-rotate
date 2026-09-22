@@ -9,15 +9,19 @@ import (
 	"time"
 )
 
-// Entry is one cached turn-state value.
+// Entry is one cached turn-state value. Cookies holds the upstream
+// Set-Cookie name=value pairs harvested with the value (never serialized:
+// they are secrets). CookieCount is the serializable count for the panel.
 type Entry struct {
-	Value   string    `json:"value"`
-	Node    string    `json:"node"`
-	Model   string    `json:"model"`
-	Account string    `json:"account"`
-	Length  int       `json:"length"`
-	Created time.Time `json:"created"`
-	Hits    int       `json:"hits"`
+	Value       string    `json:"value"`
+	Node        string    `json:"node"`
+	Model       string    `json:"model"`
+	Account     string    `json:"account"`
+	Length      int       `json:"length"`
+	Created     time.Time `json:"created"`
+	Hits        int       `json:"hits"`
+	Cookies     []string  `json:"-"`
+	CookieCount int       `json:"cookie_count"`
 }
 
 // Store is a concurrency-safe cache keyed by account+model.
@@ -54,19 +58,55 @@ func (s *Store) Get(account, model string) (*Entry, bool) {
 
 // Put stores a freshly observed value for account+model on node.
 func (s *Store) Put(account, model, node, value string) {
+	s.PutFull(account, model, node, value, nil)
+}
+
+// PutFull stores a value together with the cookies harvested alongside it.
+// A new put always replaces the old bundle (credential rotation).
+func (s *Store) PutFull(account, model, node, value string, cookies []string) {
 	if value == "" || model == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cp := append([]string(nil), cookies...)
 	s.entries[key(account, model)] = &Entry{
-		Value:   value,
-		Node:    node,
-		Model:   model,
-		Account: account,
-		Length:  len(value),
-		Created: time.Now(),
+		Value:       value,
+		Node:        node,
+		Model:       model,
+		Account:     account,
+		Length:      len(value),
+		Created:     time.Now(),
+		Cookies:     cp,
+		CookieCount: len(cp),
 	}
+}
+
+// Age reports how long ago the entry for account+model was harvested.
+func (s *Store) Age(account, model string) (time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[key(account, model)]
+	if !ok {
+		return 0, false
+	}
+	return time.Since(e.Created), true
+}
+
+// Fresh returns the entry only if it was harvested within ttl (the 240s
+// credential window). An older entry still exists via Get but must not be
+// used for cookie-pinned injection anymore.
+func (s *Store) Fresh(account, model string, ttl time.Duration) (*Entry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[key(account, model)]
+	if !ok {
+		return nil, false
+	}
+	if ttl > 0 && time.Since(e.Created) > ttl {
+		return nil, false
+	}
+	return e, true
 }
 
 // Hit increments the injection counter of the current entry.

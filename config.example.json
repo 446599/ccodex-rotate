@@ -32,6 +32,9 @@
   "state_ttl_seconds": 3600,
   "state_lengths": [292, 332],
   "inject_node_affinity": false,
+  "cookie_pin_enabled": true,
+  "cred_ttl_seconds": 240,
+  "cred_refresh_pause_seconds": 30,
   "model_aliases": {},
   "auto_config_codex": true,
   "restore_on_exit": true

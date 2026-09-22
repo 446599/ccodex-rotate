@@ -112,6 +112,7 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 		"collect_log":      p.Eg.CollectLog(),
 		"states":           p.Proxy.StateSnapshot(),
 		"state_ttl":        p.Proxy.StateTTLSeconds(),
+		"cred_ttl":         int(p.Proxy.CredTTL().Seconds()),
 		"mihomo_error":     errString(p.Mgr.Err()),
 	}
 	if p.SourcesCounts != nil {
@@ -143,6 +144,7 @@ func (p *Panel) nodes(w http.ResponseWriter, r *http.Request) {
 			"alive":    alive,
 			"state":    e.State,
 			"degraded": e.Degraded,
+			"tested":   e.Tested,
 			"reason":   e.Reason,
 		})
 	}

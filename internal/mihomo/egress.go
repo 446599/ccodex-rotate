@@ -432,6 +432,14 @@ func (e *Egress) Collect(ctx context.Context, model string) bool {
 	return false
 }
 
+// LastSeenLength returns the turn-state length seen by the most recent
+// probe round (0 if none). Used to shorten the refresh cadence after a 292.
+func (e *Egress) LastSeenLength() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastSeenLen
+}
+
 // StopCollect interrupts an in-progress collection round.
 func (e *Egress) StopCollect() bool {
 	e.mu.Lock()

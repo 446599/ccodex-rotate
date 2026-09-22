@@ -188,7 +188,7 @@ function renderStatus(s) {
   const states = s.states || [];
   $("states").innerHTML = states.length
     ? table(
-        ["模型", "长度", "来源节点", "剩余有效期", "已注入"],
+        ["模型", "长度", "来源节点", "剩余有效期", "已注入", "Cookies"],
         states
           .map(
             (x) =>
@@ -204,7 +204,18 @@ function renderStatus(s) {
               esc(time(x.created)) +
               '">—</td><td>' +
               esc(x.hits) +
-              " 次</td></tr>",
+              " 次</td><td" +
+              (Number(x.cookie_count) > 0
+                ? ' data-exp="' +
+                  (Date.parse(x.created) +
+                    (Number(s.cred_ttl) || 240) * 1000) +
+                  '" title="240秒凭据窗"'
+                : "") +
+              ">" +
+              (Number(x.cookie_count) > 0
+                ? esc(x.cookie_count) + " 个"
+                : "—") +
+              "</td></tr>",
           )
           .join(""),
       )
@@ -331,9 +342,9 @@ function renderNodes() {
             esc(labels[x.state] || x.state) +
             (x.degraded
               ? ' <span class="badge bad">降智</span>'
-              : x.alive
+              : x.tested
                 ? ' <span class="badge good">不降智</span>'
-                : "") +
+                : ' <span class="badge">未测</span>') +
             "</td><td>" +
             (x.alive && x.delay > 0 ? esc(x.delay) + " ms" : "—") +
             '</td><td><button data-pin="' +
