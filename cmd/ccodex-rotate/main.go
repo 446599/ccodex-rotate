@@ -33,7 +33,7 @@ import (
 	"ccodex-rotate/internal/web"
 )
 
-const version = "0.5.0"
+const version = "0.6.0-beta.1"
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -101,7 +101,8 @@ func usage() {
   ccodex-rotate check      validate config and generated mihomo config
   ccodex-rotate status     read live status from a running instance
   ccodex-rotate nodes      list nodes and health from a running instance
-  ccodex-rotate collect    collect a turn-state now (one node at a time)
+  ccodex-rotate node add|list|clear   manage custom nodes
+  ccodex-rotate collect    trigger a ModelTrace attribution round now
   ccodex-rotate restore    restore the Codex config backup
   ccodex-rotate paths      print config/data/codex paths
 

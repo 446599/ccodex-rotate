@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"sync"
 	"time"
 
@@ -39,6 +41,41 @@ type Panel struct {
 // Handler builds the HTTP routes for the panel and JSON API.
 func (p *Panel) Handler() http.Handler {
 	mux := http.NewServeMux()
+	bpsProxy := &httputil.ReverseProxy{
+		Rewrite: func(req *httputil.ProxyRequest) {
+			req.SetURL(&url.URL{Scheme: "http", Host: "127.0.0.1:17852"})
+			// The panel authenticates the request; do not forward its password.
+			req.Out.Header.Del("Authorization")
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "垫片离线", "code": "bps_offline",
+			})
+		},
+	}
+	// Register on the same mux so protectPanel also guards every BPS route.
+	bpsHandler := http.StripPrefix("/bps", bpsProxy)
+	mux.Handle("/bps/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Match the panel's cross-origin control protection without changing
+		// the shim's API, or forwarding the panel's credentials upstream.
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+				http.Error(w, "cross-origin request denied", http.StatusForbidden)
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" {
+				u, err := url.Parse(origin)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host != r.Host || u.User != nil {
+					http.Error(w, "cross-origin request denied", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		bpsHandler.ServeHTTP(w, r)
+	}))
 	mux.Handle("/panel/assets/", http.StripPrefix("/panel/", http.FileServer(http.FS(panelAssets))))
 	mux.HandleFunc("/panel/", p.page)
 	mux.HandleFunc("/panel", p.page)

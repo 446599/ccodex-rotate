@@ -69,6 +69,7 @@ async function mutate(button, path, body = {}, message = "操作已完成") {
   const label = button.textContent;
   button.disabled = true;
   button.textContent = "处理中…";
+  button.setAttribute("aria-busy", "true");
   try {
     const result = await request(path, body);
     notify(typeof message === "function" ? message(result) : message);
@@ -85,8 +86,12 @@ async function mutate(button, path, body = {}, message = "操作已完成") {
   } finally {
     button.textContent = label;
     button.disabled = false;
+    button.removeAttribute("aria-busy");
     mutating = false;
-    if (status) renderControls(status);
+    if (status) {
+      renderControls(status);
+      renderTrace(status);
+    }
   }
 }
 function renderControls(s) {
@@ -142,7 +147,7 @@ function renderStatus(s) {
   if (!mutating) renderControls(s);
   renderTrace(s);
   const recent = s.recent || [];
-  $("recent").innerHTML = recent.length
+  renderHTML("recent", recent.length
     ? table(
         [
           "时间",
@@ -187,15 +192,18 @@ function renderStatus(s) {
           )
           .join(""),
       )
-    : empty("暂无会话记录", "在 Codex 中发送消息后，这里会显示转发结果。");
+    : empty("暂无会话记录", "在 Codex 中发送消息后，这里会显示转发结果。")
+  );
   tick();
 }
 function renderTrace(s) {
   const on = !!s.trace_enabled;
-  $("traceBtn").textContent = on ? "检测：已开启" : "检测：已关闭";
-  $("traceBtn").setAttribute("aria-pressed", String(on));
-  $("traceBtn").classList.toggle("selected", on);
-  $("traceBtn").disabled = false;
+  if (!mutating) {
+    $("traceBtn").textContent = on ? "检测：已开启" : "检测：已关闭";
+    $("traceBtn").setAttribute("aria-pressed", String(on));
+    $("traceBtn").classList.toggle("selected", on);
+    $("traceBtn").disabled = false;
+  }
   const badge = $("traceBadge");
   const last = s.trace_last;
   if (s.trace_running) {
@@ -241,7 +249,7 @@ function renderTrace(s) {
     $("traceInterval").value = s.trace_interval || 1800;
   }
   const log = s.trace_log || [];
-  $("traceLog").innerHTML = log.length
+  renderHTML("traceLog", log.length
     ? table(
         ["时间", "预期 → 实测", "概率", "有效", "结论"],
         log
@@ -267,7 +275,8 @@ function renderTrace(s) {
           )
           .join(""),
       )
-    : empty("暂无检测记录", "打开开关或点「立即检测」跑一轮。");
+    : empty("暂无检测记录", "打开开关或点「立即检测」跑一轮。")
+  );
 }
 function renderNodes() {
   const query = $("nodeSearch").value.trim().toLowerCase();
@@ -282,7 +291,7 @@ function renderNodes() {
         query ? "没有匹配的节点" : "还没有节点",
         query
           ? "试试其他名称或代理类型。"
-          : "在上方添加订阅或节点链接，导入后将在这里显示。",
+          : "前往「订阅管理」添加订阅或节点链接，导入后将在这里显示。",
       ),
     );
     return;
@@ -458,6 +467,195 @@ document.querySelectorAll("[data-clear]").forEach((button) =>
     if (result) $(kind + "Result").textContent = "已清空" + label + "。";
   }),
 );
+// Keep shim availability separate from the main panel and pause hidden-page polling.
+let bpsStatus = null,
+  bpsLoading = false,
+  bpsAction = "",
+  bpsPollTimer;
+async function bpsRequest(path, body) {
+  const controller = new AbortController();
+  // The shim allows 30 seconds for device-code creation.
+  const timer = setTimeout(() => controller.abort(), 40000);
+  try {
+    const response = await fetch("/bps/api" + path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: body === undefined ? {} : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const message = response.status === 502 ? "垫片离线"
+        : response.status === 401 ? "认证已失效，请刷新页面重新登录。"
+        : "请求失败（HTTP " + response.status + "）";
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
+    }
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function bpsErrorText(error) {
+  if (error.name === "AbortError") return "连接超时，请刷新状态后确认操作结果。";
+  if (error instanceof TypeError) return "无法连接面板，请检查本地服务。";
+  return error.message;
+}
+function bpsAuthURL(value) {
+  try {
+    const url = new URL(value);
+    if (url.origin === "https://auth.openai.com" && !url.username && !url.password)
+      return url.href;
+  } catch (_) {}
+  return null;
+}
+function renderBPSControls() {
+  const unavailable = !bpsStatus || bpsLoading || !!bpsAction;
+  const enabled = !!(bpsStatus && bpsStatus.enabled);
+  const pending = !!(bpsStatus && bpsStatus.device.active);
+  const toggle = $("bpsSwitchBtn"), device = $("bpsDeviceBtn"), refresh = $("bpsRefreshBtn");
+  toggle.disabled = unavailable;
+  toggle.textContent = bpsAction === "switch" ? "切换中…"
+    : !bpsStatus ? "等待连接" : enabled ? "关闭垫片" : "开启垫片";
+  toggle.setAttribute("aria-pressed", String(enabled));
+  toggle.setAttribute("aria-busy", String(bpsAction === "switch"));
+  toggle.classList.toggle("primary", !enabled);
+  toggle.classList.toggle("danger", enabled);
+  device.disabled = unavailable || pending;
+  device.textContent = bpsAction === "device" ? "获取设备码…" : pending ? "等待登录…" : "设备码登录";
+  device.setAttribute("aria-busy", String(bpsAction === "device"));
+  refresh.disabled = bpsLoading || !!bpsAction;
+  refresh.textContent = bpsLoading ? "刷新中…" : "刷新状态";
+  refresh.setAttribute("aria-busy", String(bpsLoading));
+}
+function renderBPSDevice(device) {
+  const pending = device.active && device.status === "pending";
+  const url = bpsAuthURL(device.url);
+  const ready = !!(pending && url && device.user_code);
+  $("bpsDeviceBox").hidden = !ready;
+  $("bpsDeviceCode").textContent = ready ? device.user_code : "";
+  if (ready) $("bpsDeviceLink").href = url;
+  else $("bpsDeviceLink").removeAttribute("href");
+  const failed = device.status === "error" || device.status === "expired" || (pending && !ready);
+  const messages = {
+    done: "登录成功，会话已更新。",
+    expired: "设备码已过期，请重新点击「设备码登录」。",
+    error: "登录失败：" + (device.error || "请重新获取设备码。"),
+  };
+  $("bpsDeviceMessage").classList.toggle("error", !!failed);
+  $("bpsDeviceMessage").textContent = pending
+    ? ready ? "等待授权，每 5 秒更新进度。完成后会自动同步会话。" : "设备码或授权地址不可用，请刷新状态后重试。"
+    : messages[device.status] || "点击「设备码登录」开始授权。";
+}
+function renderBPSStatus(s) {
+  bpsStatus = s;
+  $("bpsConnection").textContent = "垫片已连接";
+  $("bpsConnection").className = "badge good";
+  $("bpsError").hidden = true;
+  $("bpsEnabled").textContent = s.enabled ? "已开启" : "已关闭";
+  $("bpsWiring").textContent = s.codex.wired ? "Codex 已接入垫片" : "Codex 未接入垫片";
+  $("bpsModel").textContent = s.codex.model || "未设置";
+  $("bpsDefaultModel").textContent = "垫片默认：" + (s.config.default_model || "未设置");
+  $("bpsRoute").textContent = s.codex.error ? "读取 Codex 配置失败：" + s.codex.error
+    : "当前 provider：" + s.codex.provider + (s.enabled !== s.codex.wired ? "。开关与实际线路不一致，请确认 Codex 配置。" : "。");
+  const token = s.bps, seconds = Number(token.expires_in), expiry = $("bpsExpiry");
+  delete expiry.dataset.exp;
+  expiry.removeAttribute("title");
+  expiry.textContent = token.logged_in ? "有效期未知" : "未登录";
+  if (token.logged_in && Number.isFinite(seconds) && seconds >= 0) {
+    expiry.dataset.exp = String(Date.now() + seconds * 1000);
+    expiry.title = "到期时间：" + new Date(Number(expiry.dataset.exp)).toLocaleString("zh-CN");
+  }
+  const valid = token.logged_in && seconds !== 0;
+  $("bpsLogin").textContent = !token.logged_in ? "未登录" : valid ? "已登录" : "Token 已过期";
+  $("bpsLogin").className = "badge " + (valid ? "good" : "bad");
+  $("bpsAccount").textContent = token.logged_in ? token.email || "已保存会话" : "登录后显示会话有效期";
+  renderBPSDevice(s.device);
+  $("bpsUpdated").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN") + " · 登录期间每 5 秒更新进度";
+  tick();
+  renderBPSControls();
+}
+async function refreshBPS() {
+  if (bpsLoading || bpsAction || $("bps").hidden || document.hidden) return;
+  clearTimeout(bpsPollTimer);
+  bpsLoading = true;
+  renderBPSControls();
+  try {
+    let s = await bpsRequest("/status");
+    if (!s || typeof s.enabled !== "boolean" || !s.codex || !s.config || !s.bps || !s.device)
+      throw new Error("垫片状态格式异常，请稍后重试。");
+    if (s.device.active) {
+      const device = await bpsRequest("/device/status");
+      // A completed authorization may be newer than the status/token snapshot.
+      if (device.status === "done") s = await bpsRequest("/status");
+      else s.device = device;
+    }
+    renderBPSStatus(s);
+  } catch (error) {
+    bpsStatus = null;
+    $("bpsConnection").textContent = error.status === 502 ? "垫片离线" : "状态不可用";
+    $("bpsConnection").className = "badge bad";
+    $("bpsError").hidden = false;
+    $("bpsError").textContent = bpsErrorText(error) + " 页面会自动重试，不影响主面板。";
+    for (const [id, text] of Object.entries({
+      bpsEnabled: "未连接", bpsWiring: "状态未知", bpsModel: "—",
+      bpsDefaultModel: "等待模型信息", bpsExpiry: "—", bpsAccount: "等待连接恢复",
+      bpsRoute: "垫片恢复后会自动同步线路。", bpsLogin: "等待同步",
+    })) $(id).textContent = text;
+    delete $("bpsExpiry").dataset.exp;
+    $("bpsExpiry").removeAttribute("title");
+    $("bpsLogin").className = "badge";
+    renderBPSDevice({});
+    $("bpsDeviceMessage").textContent = "连接恢复后自动同步登录进度。";
+  } finally {
+    bpsLoading = false;
+    renderBPSControls();
+    if (!$("bps").hidden && !document.hidden)
+      bpsPollTimer = setTimeout(refreshBPS, bpsStatus && bpsStatus.device.active ? 5000 : 15000);
+  }
+}
+async function runBPSAction(action, path, body, onSuccess) {
+  if (!bpsStatus || bpsLoading || bpsAction) return;
+  clearTimeout(bpsPollTimer);
+  bpsAction = action;
+  renderBPSControls();
+  try {
+    const result = await bpsRequest(path, body);
+    if (result.error || result.ok === false)
+      throw new Error(result.error || result.msg || "操作未完成，请重试。");
+    onSuccess(result);
+  } catch (error) {
+    notify(bpsErrorText(error), true);
+  } finally {
+    bpsAction = "";
+    renderBPSControls();
+    await refreshBPS();
+  }
+}
+$("bpsRefreshBtn").addEventListener("click", refreshBPS);
+$("bpsSwitchBtn").addEventListener("click", () => {
+  if (!bpsStatus) return;
+  runBPSAction("switch", "/switch", { enabled: !bpsStatus.enabled }, (result) => {
+    renderBPSStatus(result.status);
+    notify(result.status.enabled ? "垫片已开启，请确认 Codex 线路。" : "垫片已关闭，已恢复 Codex 配置。");
+  });
+});
+$("bpsDeviceBtn").addEventListener("click", () => {
+  runBPSAction("device", "/device/start", {}, (result) => {
+    if (!result.user_code || !bpsAuthURL(result.url))
+      throw new Error("设备码或授权地址不可用，请刷新状态后重试。");
+    bpsStatus.device = { ...result, active: true, status: "pending" };
+    renderBPSDevice(bpsStatus.device);
+    notify("设备码已生成，请在授权页完成登录。");
+  });
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearTimeout(bpsPollTimer);
+  else refreshBPS();
+});
+
 // The tutorial is local to this browser; it does not alter proxy configuration.
 const guideKey = "ccodex-rotate.guide.v1";
 const guideSteps = [
@@ -530,23 +728,6 @@ $("guideBack").addEventListener("click", () => {
 document
   .querySelectorAll("[data-guide]")
   .forEach((button) => button.addEventListener("click", openGuide));
-const observer = new IntersectionObserver(
-  (entries) => {
-    entries.forEach((entry) => {
-      if (entry.isIntersecting) {
-        document.querySelectorAll("nav a").forEach((a) => {
-          if (a.hash === "#" + entry.target.id)
-            a.setAttribute("aria-current", "location");
-          else a.removeAttribute("aria-current");
-        });
-      }
-    });
-  },
-  { rootMargin: "0px 0px -65% 0px" },
-);
-document
-  .querySelectorAll("main>section")
-  .forEach((section) => observer.observe(section));
 let seen = false;
 try {
   seen = localStorage.getItem(guideKey) === "seen";
@@ -652,7 +833,7 @@ renderNotifyBtn();
 connectEvents();
 // Single-page navigation: only one section is visible at a time so nodes
 // and logs each get their own page. Hash-based: #nodes deep-links.
-const PAGES = ["overview", "trace", "sources", "nodes", "activity"];
+const PAGES = ["overview", "trace", "sources", "nodes", "activity", "bps"];
 function showPage(name) {
   if (!PAGES.includes(name)) name = "overview";
   for (const p of PAGES) {
@@ -665,6 +846,8 @@ function showPage(name) {
     if (target === name) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
+  if (name === "bps") refreshBPS();
+  else clearTimeout(bpsPollTimer);
 }
 window.addEventListener("hashchange", () =>
   showPage(window.location.hash.replace(/^#/, "")),

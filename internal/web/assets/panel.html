@@ -5,6 +5,89 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>控制台 · ccodex-rotate</title>
     <link rel="stylesheet" href="/panel/assets/panel.css?v={{.Version}}" />
+    <!-- Shared theme tokens are mirrored in the standalone BPS PAGE_HTML. -->
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7f9;
+        --surface: #fff;
+        --ink: #192a37;
+        --muted: #647380;
+        --border: #e2e8ed;
+        --accent: #146c57;
+        --accent-hover: #105341;
+        --soft: #eaf5ef;
+        --danger: #b53c36;
+        --danger-soft: #fbecea;
+        --surface-subtle: #f8fafb;
+        --surface-hover: #f0f4f5;
+        --border-hover: #b9c8ce;
+        --input-bg: #fafcfd;
+        --input-border: #ccd7df;
+        --badge-bg: #eef2f5;
+        --badge-ink: #536572;
+        --focus: #48a28c;
+        --radius: 16px;
+        --radius-control: 9px;
+        --radius-badge: 6px;
+        --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        --font-mono: ui-monospace, SFMono-Regular, monospace;
+        --motion-fast: 160ms;
+        font: 14px/1.6 var(--font-sans);
+        color: var(--ink);
+        background: var(--bg);
+      }
+      button, .button, input, textarea, nav a { border-radius: var(--radius-control); }
+      button, .button { transition: background var(--motion-fast), border-color var(--motion-fast), opacity var(--motion-fast); }
+      button:not(:disabled):hover, .button:hover { background: var(--surface-hover); border-color: var(--border-hover); }
+      button.primary:not(:disabled):hover, .button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+      button:not(:disabled):active, .button:active { opacity: .8; }
+      button:disabled { cursor: not-allowed; }
+      button[aria-busy="true"] { cursor: progress; }
+      :is(button, a, input, textarea, summary, [tabindex]):focus-visible { outline-color: var(--focus); }
+      .badge { background: var(--badge-bg); color: var(--badge-ink); border-radius: var(--radius-badge); }
+      .badge.good { background: var(--soft); color: var(--accent); }
+      .badge.bad, .notice.error { background: var(--danger-soft); color: var(--danger); }
+      input, textarea { background: var(--input-bg); border-color: var(--input-border); }
+      code { font-family: var(--font-mono); }
+      nav a[aria-current="page"] { background: var(--soft); color: var(--accent); box-shadow: inset 3px 0 var(--accent); font-weight: 700; }
+      .empty { min-height: 136px; display: flex; flex-direction: column; justify-content: center; border: 1px dashed var(--border-hover); background: var(--surface-subtle); }
+      .empty strong { font-size: 15px; }
+      .page-heading > div, .section-title > div, .section-heading > *, .detail-row > * { min-width: 0; overflow-wrap: anywhere; }
+      .section-heading .actions { margin-top: 0; }
+      .metric strong, .metric small, .updated, .detail-row { overflow-wrap: anywhere; }
+      .bps-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+      .bps-metrics strong { margin: 8px 0; font-size: clamp(18px, 2vw, 26px); line-height: 1.4; letter-spacing: -.3px; }
+      .bps-device { margin-top: 18px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--surface-subtle); }
+      .bps-device .field-help { margin: 14px 0 6px; }
+      .device-code { display: block; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-control); font-size: 24px; font-weight: 700; letter-spacing: 2px; text-align: center; user-select: all; overflow-wrap: anywhere; }
+      #bps .section-title .actions { margin-top: 0; }
+      #bps .updated { display: block; white-space: normal; }
+      @media (max-width: 900px) {
+        .shell { grid-template-columns: minmax(0, 1fr); }
+        aside { display: block; padding: 12px 20px; border-right: 0; border-bottom: 1px solid var(--border); }
+        aside .nav-label, .sidebar-note { display: none; }
+        aside nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+        aside nav a { min-width: 0; min-height: 44px; padding: 10px 8px; text-align: center; }
+        main { padding: 24px 20px; }
+        .bps-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+      }
+      @media (max-width: 600px) {
+        .topbar { height: auto; min-height: 80px; flex-wrap: wrap; padding: 16px; gap: 12px; }
+        .top-actions { flex-wrap: wrap; gap: 8px; width: 100%; }
+        aside { padding: 10px 16px; }
+        main { padding: 20px 16px; }
+        .page-heading, .detail-row { flex-wrap: wrap; }
+        .updated { white-space: normal; }
+        .bps-metrics { grid-template-columns: minmax(0, 1fr); }
+        .detail-row > span:last-child { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .guide-route { flex-wrap: wrap; }
+        .toast { width: max-content; max-width: calc(100% - 32px); overflow-wrap: anywhere; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { transition: none !important; animation: none !important; }
+      }
+    </style>
     <script src="/panel/assets/panel.js?v={{.Version}}" defer></script>
   </head>
   <body>
@@ -27,9 +110,9 @@
       <aside>
         <div class="nav-label">工作空间</div>
           <nav aria-label="控制台导航">
-            <a href="#overview">运行概览</a><a href="#trace">降智检测</a
+            <a href="#overview" aria-current="page">运行概览</a><a href="#trace">降智检测</a
             ><a href="#sources">订阅管理</a><a href="#nodes">节点列表</a
-            ><a href="#activity">运行日志</a>
+            ><a href="#activity">运行日志</a><a href="#bps">垫片 BPS</a>
           </nav>
         <div class="sidebar-note">
           <span class="dot"></span> 本地运行
@@ -146,7 +229,7 @@
               tabindex="0"
               role="region"
               aria-label="指纹检测记录"
-            ></div>
+            ><div class="empty"><strong>等待检测记录</strong><p>服务连接后自动同步。</p></div></div>
           </div>
         </section>
         <section id="sources">
@@ -233,7 +316,7 @@
               role="region"
               aria-label="节点列表"
             >
-              正在加载节点…
+              <div class="empty"><strong>正在加载节点…</strong><p>连接本地服务后自动显示节点列表。</p></div>
             </div>
           </div>
         </section>
@@ -252,10 +335,64 @@
               tabindex="0"
               role="region"
               aria-label="会话日志"
-            ></div>
+            ><div class="empty"><strong>等待会话记录</strong><p>服务连接后自动同步转发结果。</p></div></div>
           </div>
         </section>
-        <footer>ccodex-rotate <span>本地控制台 · 每 3 秒同步状态</span></footer>
+        <section id="bps" aria-labelledby="bpsTitle" hidden>
+          <div class="section-title">
+            <div>
+              <h2 id="bpsTitle">垫片 BPS</h2>
+              <p class="muted">管理 Codex 垫片线路与 Excel 会话，不影响节点轮换。</p>
+            </div>
+            <div class="actions">
+              <span id="bpsConnection" class="badge" role="status">等待连接</span>
+              <button id="bpsRefreshBtn" type="button">刷新状态</button>
+              <a class="button quiet" href="http://127.0.0.1:17852/" target="_blank" rel="noopener noreferrer">独立控制台 <span aria-hidden="true">↗</span></a>
+            </div>
+          </div>
+          <div id="bpsError" class="notice error" role="status" hidden></div>
+          <div class="metrics bps-metrics">
+            <article class="metric">
+              <span>线路开关</span><strong id="bpsEnabled">—</strong>
+              <small id="bpsWiring">等待线路信息</small>
+            </article>
+            <article class="metric">
+              <span>当前模型</span><strong id="bpsModel">—</strong>
+              <small id="bpsDefaultModel">等待默认模型</small>
+            </article>
+            <article class="metric">
+              <span>Token 有效期</span><strong id="bpsExpiry">—</strong>
+              <small id="bpsAccount">等待会话信息</small>
+            </article>
+          </div>
+          <div class="bps-grid">
+            <article class="card">
+              <h3>线路控制</h3>
+              <p id="bpsRoute" class="muted">读取 Codex 配置中…</p>
+              <div class="actions">
+                <button id="bpsSwitchBtn" type="button" class="primary" aria-pressed="false" disabled>等待连接</button>
+              </div>
+              <p class="field-help">开启会备份 Codex 配置；关闭会恢复备份。CC Switch 可能改写配置，切换后请确认线路状态。</p>
+            </article>
+            <article class="card">
+              <div class="section-heading">
+                <h3>Excel 会话</h3><span id="bpsLogin" class="badge">等待同步</span>
+              </div>
+              <p class="muted">在授权页输入设备码，登录完成后自动更新会话。</p>
+              <div class="actions">
+                <button id="bpsDeviceBtn" type="button" disabled>设备码登录</button>
+              </div>
+              <div id="bpsDeviceBox" class="bps-device" hidden>
+                <a id="bpsDeviceLink" class="button primary" target="_blank" rel="noopener noreferrer">打开授权页 <span aria-hidden="true">↗</span></a>
+                <p class="field-help">在授权页输入以下设备码（仅用于本次登录）</p>
+                <code id="bpsDeviceCode" class="device-code"></code>
+              </div>
+              <p id="bpsDeviceMessage" class="form-result" role="status">点击「设备码登录」开始授权。</p>
+            </article>
+          </div>
+          <p id="bpsUpdated" class="updated">等待状态同步 · 登录期间每 5 秒更新进度</p>
+        </section>
+        <footer>ccodex-rotate <span>主面板每 3 秒同步 · 垫片每 15 秒同步</span></footer>
       </main>
     </div>
     <dialog
