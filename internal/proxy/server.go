@@ -5,14 +5,15 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +22,6 @@ import (
 
 	"ccodex-rotate/internal/config"
 	"ccodex-rotate/internal/modelid"
-	"ccodex-rotate/internal/turnstate"
 )
 
 // Egress abstracts the rotating outbound path.
@@ -50,8 +50,6 @@ type Record struct {
 	Model       string    `json:"model,omitempty"`
 	ServedModel string    `json:"served_model,omitempty"`
 	Quota       string    `json:"quota,omitempty"`
-	Injected    bool      `json:"injected"`
-	Cookie      bool      `json:"cookie,omitempty"`
 	Attempts    int       `json:"attempts"`
 	Millis      int64     `json:"millis"`
 }
@@ -73,17 +71,16 @@ func (p *prefixCapture) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// Server is the local reverse proxy.
+// Server is the local reverse proxy: transparent forwarding with
+// health-based failover plus behavioral degradation challenges. It keeps no
+// turn-state and injects nothing.
 type Server struct {
-	cfg     config.Config
-	eg      Egress
-	logf    func(string, ...any)
-	recent  *ring
-	state   *turnstate.Store
-	lengths map[int]bool
-	models  *modelid.Resolver
-	inject  atomic.Bool
-	force   atomic.Value // string: forced model ("" = off)
+	cfg    config.Config
+	eg     Egress
+	logf   func(string, ...any)
+	recent *ring
+	models *modelid.Resolver
+	force  atomic.Value // string: forced model ("" = off)
 
 	reqCount int64
 	errCount int64
@@ -93,203 +90,25 @@ type Server struct {
 	auth      string
 	account   string
 	lastModel string
-	onAuth    func()
-	authOnce  sync.Once
-
-	needMu     sync.Mutex
-	lastNeed   map[string]time.Time
-	onNeed     func(model string)
-	collectSet map[string]bool
-
-	jar *cookieJar
-
-	onCredExpired func(model string)
-}
-
-// CookieInfo returns the cookie jar size and freshest age in seconds.
-func (s *Server) CookieInfo() (int, int64) {
-	if s.jar == nil {
-		return 0, -1
-	}
-	return s.jar.info()
-}
-
-// SetOnCredExpired registers a callback fired when a live request arrives
-// with a credential bundle older than the freshness window and no newer
-// bundle has replaced it yet.
-func (s *Server) SetOnCredExpired(f func(model string)) { s.onCredExpired = f }
-
-// CredTTL is the freshness window of a harvested bundle (292 + cookies).
-func (s *Server) CredTTL() time.Duration {
-	if s.cfg.CredTTLSeconds <= 0 {
-		return 240 * time.Second
-	}
-	return time.Duration(s.cfg.CredTTLSeconds) * time.Second
-}
-
-// respCookies extracts upstream Set-Cookie name=value pairs for replay.
-func respCookies(resp *http.Response) []string {
-	if resp == nil {
-		return nil
-	}
-	var out []string
-	for _, c := range resp.Cookies() {
-		if c.Name == "" || c.Value == "" {
-			continue
-		}
-		out = append(out, c.Name+"="+c.Value)
-	}
-	return out
 }
 
 // cookieJar isolates cookies by the same account + canonical model key as turn-state.
-// Callers decide whether a response is eligible to refresh its bundle.
-type cookieKey struct {
-	account string
-	model   string
-}
-type cookieJar struct {
-	mu      sync.Mutex
-	cookies map[cookieKey]map[string]string
-	at      map[cookieKey]time.Time
-}
-
-func newCookieJar() *cookieJar {
-	return &cookieJar{cookies: map[cookieKey]map[string]string{}, at: map[cookieKey]time.Time{}}
-}
-
-// store merges name=value pairs into this account/model's jar.
-func (j *cookieJar) store(account, model string, pairs []string) {
-	if account == "" || model == "" || len(pairs) == 0 {
-		return
-	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	m := j.cookies[cookieKey{account, model}]
-	if m == nil {
-		m = map[string]string{}
-		j.cookies[cookieKey{account, model}] = m
-	}
-	for _, p := range pairs {
-		name, value, ok := strings.Cut(p, "=")
-		if !ok || name == "" {
-			continue
-		}
-		m[name] = value
-	}
-	j.at[cookieKey{account, model}] = time.Now()
-}
-
-// fresh returns this account/model's cookies if harvested within ttl.
-func (j *cookieJar) fresh(account, model string, ttl time.Duration) ([]string, bool) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	m := j.cookies[cookieKey{account, model}]
-	if len(m) == 0 {
-		return nil, false
-	}
-	if ttl > 0 {
-		if at, ok := j.at[cookieKey{account, model}]; !ok || time.Since(at) > ttl {
-			return nil, false
-		}
-	}
-	out := make([]string, 0, len(m))
-	for n, v := range m {
-		out = append(out, n+"="+v)
-	}
-	sort.Strings(out)
-	return out, true
-}
-
-// info returns the total cookie count and the freshest age in seconds
-// (-1 when the jar is empty).
-func (j *cookieJar) info() (int, int64) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	count := 0
-	var newest time.Time
-	for acct, m := range j.cookies {
-		count += len(m)
-		if at, ok := j.at[acct]; ok && at.After(newest) {
-			newest = at
-		}
-	}
-	if count == 0 {
-		return 0, -1
-	}
-	return count, int64(time.Since(newest).Seconds())
-}
-
-// drop deletes only this account/model's cookies together with a degraded
-// bundle. Fresh cookies arrive with the next 292.
-func (j *cookieJar) drop(account, model string) {
-	if account == "" || model == "" {
-		return
-	}
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	delete(j.cookies, cookieKey{account, model})
-	delete(j.at, cookieKey{account, model})
-}
-
-// SetOnAuth registers a callback fired once, the first time account auth is
-// observed. It is used to kick off a full node collection scan immediately.
-func (s *Server) SetOnAuth(f func()) { s.onAuth = f }
-
-// SetOnNeedState registers a callback fired when a request arrives for a model
-// that has no cached turn-state yet, so collection can start right away.
-func (s *Server) SetOnNeedState(f func(model string)) { s.onNeed = f }
-
-// SetCollectModels restricts on-demand collection to the given canonical
-// models. When empty, only cfg.ProbeModel triggers collection.
-func (s *Server) SetCollectModels(models []string) {
-	set := map[string]bool{}
-	base := append([]string{s.cfg.ProbeModel}, models...)
-	for _, m := range base {
-		if c := s.models.Canonical(m); c != "" {
-			set[c] = true
-		}
-	}
-	s.collectSet = set
-}
-
-func (s *Server) triggerNeedState(model string) {
-	if s.onNeed == nil {
-		return
-	}
-	if len(s.collectSet) > 0 && !s.collectSet[model] {
-		return
-	}
-	s.needMu.Lock()
-	if s.lastNeed == nil {
-		s.lastNeed = map[string]time.Time{}
-	}
-	if t, ok := s.lastNeed[model]; ok && time.Since(t) < 30*time.Second {
-		s.needMu.Unlock()
-		return
-	}
-	s.lastNeed[model] = time.Now()
-	s.needMu.Unlock()
-	s.onNeed(model)
-}
-
 // New builds a Server.
 func New(cfg config.Config, eg Egress, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	s := &Server{cfg: cfg, eg: eg, logf: logf, recent: newRing(50), models: modelid.New(cfg.ModelAliases), jar: newCookieJar()}
-	// The state store is always created so injection can be toggled at runtime.
-	s.state = turnstate.New(time.Duration(cfg.StateTTLSeconds) * time.Second)
-	if len(cfg.StateLengths) > 0 {
-		s.lengths = map[int]bool{}
-		for _, n := range cfg.StateLengths {
-			s.lengths[n] = true
-		}
-	}
-	s.inject.Store(cfg.InjectState)
+	s := &Server{cfg: cfg, eg: eg, logf: logf, recent: newRing(50), models: modelid.New(cfg.ModelAliases)}
 	s.force.Store(cfg.ForceModel)
 	return s
+}
+
+// CanonicalModel maps a requested model name to its canonical identifier.
+func (s *Server) CanonicalModel(name string) string {
+	if s.models == nil {
+		return name
+	}
+	return s.models.Canonical(name)
 }
 
 // ForceModel returns the currently forced model ("" = off).
@@ -301,91 +120,30 @@ func (s *Server) ForceModel() string {
 // SetForceModel sets (or clears) the forced model at runtime.
 func (s *Server) SetForceModel(name string) { s.force.Store(name) }
 
-// SetInjection enables or disables credential injection at runtime.
-func (s *Server) SetInjection(on bool) { s.inject.Store(on) }
-
-// InjectionEnabled reports whether credential injection is on.
-func (s *Server) InjectionEnabled() bool { return s.inject.Load() }
-
-// StateTTLSeconds is the credential validity window.
-func (s *Server) StateTTLSeconds() int { return s.cfg.StateTTLSeconds }
-
-// StateSnapshot returns the cached turn-state entries for the panel,
-// including recently expired ones (flagged) for display.
-func (s *Server) StateSnapshot() []turnstate.Entry {
-	if s.state == nil {
-		return nil
-	}
-	return s.state.SnapshotAll()
-}
-
-// HasValidState reports whether a usable turn-state is cached for model.
-func (s *Server) HasValidState(model string) bool {
-	if s.state == nil {
-		return false
-	}
-	m := s.models.Canonical(model)
-	if m == "" {
-		return false
-	}
-	s.authMu.Lock()
-	account := s.account
-	s.authMu.Unlock()
-	_, ok := s.state.Get(account, m)
-	return ok
-}
-
-// HasValidStateForProbe reports whether a usable (target-length) turn-state is
-// already cached for the collection model, so collection can be skipped.
-func (s *Server) HasValidStateForProbe() bool { return s.HasValidState(s.cfg.ProbeModel) }
-
-// HasAuth reports whether account credentials have been observed yet. Collection
-// must not start before a real request supplies them.
-func (s *Server) HasAuth() bool {
-	s.authMu.Lock()
-	defer s.authMu.Unlock()
-	return s.auth != ""
-}
-
-// Probe performs one state-collection attempt through the current node. It uses
-// the account auth captured from real traffic; without it, it just checks
-// reachability (length 0). When a value of an accepted length is returned it is
-// cached (bound to the current node) for later injection.
-func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel string) (int, bool, string, string, error) {
+// Challenge sends one ModelTrace-style attribution prompt through the
+// current forwarding exit (what the user actually gets) and returns the
+// model's text output. The endpoint requires streaming: text deltas are
+// accumulated from the SSE stream.
+func (s *Server) Challenge(ctx context.Context, model, prompt string) (string, error) {
 	s.authMu.Lock()
 	auth, account := s.auth, s.account
 	s.authMu.Unlock()
-	model := s.models.Canonical(probeModel)
-	if model == "" {
-		model = s.models.Canonical(s.cfg.ProbeModel)
+	if auth == "" {
+		return "", fmt.Errorf("no account auth observed yet")
 	}
 	if model == "" {
 		model = s.cfg.ProbeModel
 	}
-
-	if auth == "" {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.HealthURL, nil)
-		if err != nil {
-			return 0, false, "", "", err
-		}
-		req.Header.Set("User-Agent", "ccodex-rotate/probe")
-		resp, err := client.Do(req)
-		if err != nil {
-			return 0, false, "", "", err
-		}
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<14))
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
-			return 0, false, "", "", nil
-		}
-		return 0, true, "", "", nil
-	}
-
-	body := probeBody(model)
+	body := `{"model":` + strconv.Quote(model) +
+		`,"instructions":"You are a helper. Complete the task directly.",` +
+		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":` +
+		strconv.Quote(prompt) + `}]}],` +
+		`"stream":true,"store":false,"reasoning":{"effort":"medium"},` +
+		`"tools":[],"parallel_tool_calls":false}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.cfg.UpstreamBase+"/backend-api/codex/responses", strings.NewReader(body))
 	if err != nil {
-		return 0, false, "", "", err
+		return "", err
 	}
 	req.Header.Set("Authorization", auth)
 	if account != "" {
@@ -396,51 +154,59 @@ func (s *Server) Probe(ctx context.Context, client *http.Client, probeModel stri
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	req.Header.Set("originator", "codex_cli_rs")
 	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0")
+	if s.eg == nil {
+		return "", fmt.Errorf("no egress")
+	}
+	client := &http.Client{Timeout: 300 * time.Second, Transport: s.eg.Transport()}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, false, "", "", err
+		return "", err
 	}
-	value := resp.Header.Get("X-Codex-Turn-State")
-	prefix, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	resp.Body.Close()
-	served := extractModel(prefix)
-	// Harvest cookies: in frozen mode only a 292 response may update the
-	// jar (every response mints a unique cookie set; a 312 set must not
-	// overwrite the 292 set). Refresh-all mode keeps the old behavior.
-	if s.jar != nil && (s.cfg.CookieRefreshAll ||
-		(len(value) > 0 && s.lengthAllowed(len(value)))) {
-		s.jar.store(account, model, respCookies(resp))
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
+		return "", fmt.Errorf("upstream status %d: %s", resp.StatusCode, truncate(string(raw), 200))
 	}
+	return accumulateStreamText(resp.Body)
+}
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode >= 500 {
-		return 0, false, "", served, nil
-	}
-	if value == "" {
-		return 0, true, "", served, nil
-	}
-	length := len(value)
-	if s.state != nil && s.lengthAllowed(length) {
-		node := ""
-		if s.eg != nil {
-			node = s.eg.Current()
+// accumulateStreamText collects output text from a Responses SSE stream.
+func accumulateStreamText(r io.Reader) (string, error) {
+	var sb strings.Builder
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
 		}
-		s.state.PutFull(account, model, node, value, respCookies(resp))
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var ev map[string]any
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			continue
+		}
+		if d, ok := ev["delta"].(string); ok {
+			sb.WriteString(d)
+			continue
+		}
+		if t, ok := ev["text"].(string); ok {
+			sb.WriteString(t)
+		}
 	}
-	return length, true, value, served, nil
+	if err := sc.Err(); err != nil {
+		return sb.String(), err
+	}
+	return sb.String(), nil
 }
 
-func probeBody(model string) string {
-	return `{"model":"` + model + `","instructions":"You are a helper.",` +
-		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],` +
-		`"stream":true,"store":false,"reasoning":{"effort":"low"},` +
-		`"tools":[],"parallel_tool_calls":false}`
-}
-
-func (s *Server) lengthAllowed(n int) bool {
-	if s.lengths == nil {
-		return true
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	return s.lengths[n]
+	return s[:n] + "…"
 }
 
 // Stats returns counters and the recent request log.
@@ -495,10 +261,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Remember the account auth so node scans can collect a turn-state.
+	// Remember the account auth so behavioral challenges can reuse it.
 	if a := r.Header.Get("Authorization"); a != "" {
 		s.authMu.Lock()
-		first := s.auth == ""
 		s.auth = a
 		if account != "" {
 			s.account = account
@@ -507,15 +272,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.lastModel = model
 		}
 		s.authMu.Unlock()
-		if first && s.onAuth != nil {
-			s.authOnce.Do(s.onAuth)
-		}
-		// If this model has no cached 292 yet, start collecting immediately.
-		if s.state != nil && model != "" {
-			if _, ok := s.state.Get(account, model); !ok {
-				s.triggerNeedState(model)
-			}
-		}
 	}
 
 	maxAttempts := s.cfg.MaxRetries + 1
@@ -530,8 +286,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var lastErr error
 	attempts := 0
-	injectedAny := false
-	cookieAny := false
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		attempts = attempt + 1
 		req, err := http.NewRequestWithContext(ctx, r.Method, target, bytes.NewReader(body))
@@ -542,42 +296,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		copyHeaders(req.Header, r.Header)
 		req.Host = "" // let net/http set from URL
 		req.ContentLength = int64(len(body))
-
-		// Inject a cached turn-state (can be toggled off at runtime).
-		if s.inject.Load() && s.state != nil && model != "" {
-			if e, ok := s.state.Get(account, model); ok && s.lengthAllowed(e.Length) {
-				inject := true
-				if s.cfg.InjectNodeAffinity && e.Node != "" && e.Node != s.eg.Current() {
-					inject = s.eg.Pin(ctx, e.Node) == nil
-				}
-				if inject {
-					req.Header.Set("X-Codex-Turn-State", e.Value)
-					s.state.Hit(account, model)
-					injectedAny = true
-					if _, fresh := s.state.Fresh(account, model, s.CredTTL()); !fresh {
-						if s.onCredExpired != nil {
-							s.onCredExpired(model)
-						}
-					}
-				}
-			} else if s.state.Exists(account, model) {
-				// A bundle existed but fully expired with no replacement:
-				// this is the case the expiry popup is for (Get can no
-				// longer see it, so it must be checked separately).
-				if s.onCredExpired != nil {
-					s.onCredExpired(model)
-				}
-			}
-		}
-
-		// Inject fresh upstream cookies on every request, independent of
-		// turn-state, subject to CookieRefreshAll and the credential TTL.
-		if s.cfg.CookiePin && s.jar != nil && req.Header.Get("Cookie") == "" {
-			if ck, ok := s.jar.fresh(account, model, s.CredTTL()); ok {
-				req.Header.Set("Cookie", strings.Join(ck, "; "))
-				cookieAny = true
-			}
-		}
 
 		tr := s.eg.Transport()
 		resp, err := tr.RoundTrip(req)
@@ -591,20 +309,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-		// Learn the turn-state the upstream just issued, but only keep a value
-		// of an accepted length (otherwise a wrong-length value would suppress
-		// both collection and injection). The cookie jar follows the same
-		// frozen rule: only a 292 response refreshes it.
-		learned := resp.Header.Get("X-Codex-Turn-State")
-		if s.jar != nil && (s.cfg.CookieRefreshAll ||
-			(learned != "" && s.lengthAllowed(len(learned)))) {
-			s.jar.store(account, model, respCookies(resp))
-		}
-		if s.state != nil && model != "" {
-			if v := resp.Header.Get("X-Codex-Turn-State"); v != "" && s.lengthAllowed(len(v)) {
-				s.state.PutFull(account, model, s.eg.Current(), v, respCookies(resp))
-			}
-		}
+		// Record the served model for degradation marking (passive only).
 		if retriableStatus(resp.StatusCode) && attempt+1 < maxAttempts {
 			reason := "error"
 			if resp.StatusCode == http.StatusForbidden {
@@ -629,26 +334,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// node degraded in the panel; never auto-switches).
 		if r.Method == http.MethodPost {
 			s.eg.Outcome(model, served)
-			// A degraded bundle is void: drop the turn-state and its
-			// cookies so nothing stale is ever injected again. The next
-			// request re-triggers collection automatically.
-			if served != "" && model != "" && served != model {
-				s.logf("bundle voided: %s served %s, dropped", model, served)
-				if s.state != nil {
-					s.state.Drop(account, model)
-				}
-				if s.jar != nil {
-					s.jar.drop(account, model)
-				}
-			}
 		}
 		s.record(Record{
 			Time: time.Now(), Method: r.Method, Path: r.URL.Path,
 			Status: resp.StatusCode, Node: s.eg.Current(), Model: model,
 			ServedModel: served,
 			Quota:       resp.Header.Get("x-codex-primary-used-percent"),
-			Injected:    injectedAny, Cookie: cookieAny, Attempts: attempts,
-			Millis: time.Since(start).Milliseconds(),
+			Attempts:    attempts,
+			Millis:      time.Since(start).Milliseconds(),
 		})
 		if copyErr != nil {
 			s.logf("stream %s: %v", r.URL.Path, copyErr)

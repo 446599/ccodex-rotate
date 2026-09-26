@@ -17,7 +17,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -27,6 +26,7 @@ import (
 	"ccodex-rotate/internal/config"
 	"ccodex-rotate/internal/core"
 	"ccodex-rotate/internal/mihomo"
+	"ccodex-rotate/internal/mtrace"
 	"ccodex-rotate/internal/nodes"
 	"ccodex-rotate/internal/proxy"
 	"ccodex-rotate/internal/subscription"
@@ -364,45 +364,56 @@ func runServe(cfgPath, codexHome string) {
 		}()
 	}
 	srv := proxy.New(cfg, eg, log.Printf)
-	var trigger chan struct{}
-	if cfg.ProbeEnabled {
-		eg.SetProbe(srv.Probe)
-		trigger = make(chan struct{}, 1)
-		if cfg.AutoCollect {
-			// Optional: start collecting as soon as a target-model request
-			// arrives (may fire from background app traffic).
-			srv.SetOnNeedState(func(model string) {
-				log.Printf("no 292 for %s yet; collecting now", model)
-				select {
-				case trigger <- struct{}{}:
-				default:
-				}
-			})
-		}
-		srv.SetCollectModels(cfg.CollectModels)
-		go collectLoop(ctx, cfg, eg, trigger, srv.HasValidState)
-	}
-	if cfg.ProbeEnabled && cfg.HuntEnabled {
-		go huntLoop(ctx, cfg, eg)
-	}
 
-	panel := &web.Panel{
+	// Behavioral degradation watchdog (ModelTrace attribution): off by
+	// default, each round costs three full generations.
+	var panel *web.Panel
+	expFn := func() string {
+		if m := srv.CanonicalModel(cfg.TraceModel); m != "" {
+			return m
+		}
+		if m := srv.CanonicalModel(cfg.ProbeModel); m != "" {
+			return m
+		}
+		if cfg.TraceModel != "" {
+			return cfg.TraceModel
+		}
+		return cfg.ProbeModel
+	}
+	var traceMu sync.Mutex
+	lastTraceNotify := time.Time{}
+	mon := mtrace.NewMonitor(
+		func(pctx context.Context, prompt string) (string, error) {
+			return srv.Challenge(pctx, expFn(), prompt)
+		},
+		func(msg string) {
+			traceMu.Lock()
+			cooled := time.Since(lastTraceNotify) < 30*time.Minute
+			if !cooled {
+				lastTraceNotify = time.Now()
+			}
+			traceMu.Unlock()
+			if cooled {
+				return
+			}
+			if cfg.NotifyEnabled {
+				desktopNotify("ccodex-rotate", msg)
+			}
+			panel.Broadcast(msg)
+		},
+	)
+	mon.SetEnabled(cfg.TraceEnabled)
+	mon.SetInterval(time.Duration(cfg.TraceIntervalSec) * time.Second)
+	go mon.RunLoop(ctx, expFn)
+
+	panel = &web.Panel{
 		Listen: cfg.Listen, Upstream: cfg.UpstreamBase,
 		Version:    version,
 		Password:   cfg.PanelAuthPassword(),
-		ProbeModel: cfg.ProbeModel, TargetLengths: cfg.StateLengths,
-		SuccessIntervalS: cfg.CollectSuccessIntervalSec, RetryIntervalS: cfg.CollectRetryIntervalSec,
-		HuntNodes:    cfg.HuntNodes,
-		CollectLanes: cfg.CollectLanes,
-		Mgr:          mgr, Eg: eg, Proxy: srv,
-	}
-	if trigger != nil {
-		panel.Trigger = func() {
-			select {
-			case trigger <- struct{}{}:
-			default:
-			}
-		}
+		ProbeModel: cfg.ProbeModel,
+		Trace:      mon,
+		TraceModel: cfg.TraceModel,
+		Mgr:        mgr, Eg: eg, Proxy: srv,
 	}
 	panel.SourcesCounts = func() (int, int, int) {
 		c, err := config.Load(cfgPath)
@@ -482,43 +493,6 @@ func runServe(cfgPath, codexHome string) {
 		panelSrv = &http.Server{Addr: cfg.PanelListen, Handler: panelHandler, ReadHeaderTimeout: 10 * time.Second}
 	}
 
-	// Astra-window notifications: desktop popup + open panel tabs, cooled
-	// down to one every 10 minutes so a long window does not spam.
-	var notifyMu sync.Mutex
-	lastNotify := time.Time{}
-	eg.SetNotify(func(msg string) {
-		notifyMu.Lock()
-		cooled := time.Since(lastNotify) < 10*time.Minute
-		if !cooled {
-			lastNotify = time.Now()
-		}
-		notifyMu.Unlock()
-		if cooled {
-			return
-		}
-		if cfg.NotifyEnabled {
-			desktopNotify("ccodex-rotate", msg)
-		}
-		panel.Broadcast(msg)
-	})
-	// Credential-bundle expiry: after the freshness window with no new
-	// bundle, pop a notification (same 10-minute cooldown as astra alerts).
-	srv.SetOnCredExpired(func(model string) {
-		notifyMu.Lock()
-		cooled := time.Since(lastNotify) < 10*time.Minute
-		if !cooled {
-			lastNotify = time.Now()
-		}
-		notifyMu.Unlock()
-		if cooled {
-			return
-		}
-		msg := "292 凭据已过期（>240秒）且暂无新凭据，采集中…"
-		if cfg.NotifyEnabled {
-			desktopNotify("ccodex-rotate", msg)
-		}
-		panel.Broadcast(msg)
-	})
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: root, ReadHeaderTimeout: 10 * time.Second}
 
 	wired := false
@@ -629,130 +603,9 @@ func runNodes(cfgPath string) {
 func runCollect(cfgPath string) {
 	cfg, err := config.Load(cfgPath)
 	fatal(err)
-	_, err = panelRequest(cfg, http.MethodPost, "/api/collect")
+	_, err = panelRequest(cfg, http.MethodPost, "/api/trace-now")
 	fatal(err)
-	log.Printf("collection started; check progress with `ccodex-rotate status`")
-}
-
-// huntLoop periodically probes a few exits for an "astra window" (an exit
-// currently serving the target model) and moves forwarding onto it, because
-// upstream routing rotates every few minutes.
-func huntLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress) {
-	t := time.NewTicker(time.Duration(cfg.HuntIntervalSec) * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			if name, ok := eg.Hunt(ctx, cfg.ProbeModel, cfg.HuntNodes); ok {
-				log.Printf("astra窗口：%s 正在服务 %s，已切过去", name, cfg.ProbeModel)
-			}
-		}
-	}
-}
-
-// collectLoop collects a turn-state, then waits 30 minutes after success or
-// 5 minutes after failure, and also runs immediately when triggered on demand.
-// It probes nodes one at a time and stops on the first success.
-// collectLoop waits for a real request (a target model with no state) before
-// the first collection, then refreshes 30 minutes after success or retries 5
-// minutes after failure. It collects every target model (ProbeModel plus
-// CollectModels such as the review model), probing nodes one at a time and
-// stopping on the first success per model.
-func collectLoop(ctx context.Context, cfg config.Config, eg *mihomo.Egress, trigger <-chan struct{}, haveState func(string) bool) {
-	targets := append([]string{cfg.ProbeModel}, cfg.CollectModels...)
-	firstTarget := ""
-	for _, m := range targets {
-		if m != "" {
-			firstTarget = m
-			break
-		}
-	}
-	// refreshAt forces a re-collection when it elapses, even if a usable
-	// state exists: a 292 bundle is only valid ~240s, so after each 292
-	// success we pause briefly and harvest a fresh one.
-	var refreshAt time.Time
-	// Do not collect until the client actually asks for a target model.
-	select {
-	case <-ctx.Done():
-		return
-	case <-trigger:
-		log.Printf("first target request seen; collecting turn-state")
-	}
-	for {
-		need := ""
-		for _, m := range targets {
-			if m == "" {
-				continue
-			}
-			if !haveState(m) {
-				need = m
-				break
-			}
-		}
-		if need == "" && firstTarget != "" && !refreshAt.IsZero() && !time.Now().Before(refreshAt) {
-			need = firstTarget
-			refreshAt = time.Time{}
-			log.Printf("292 refresh due; collecting a fresh bundle")
-		}
-		if need == "" {
-			// Every target model already has a usable state.
-			wait := time.Duration(cfg.CollectSuccessIntervalSec) * time.Second
-			if !refreshAt.IsZero() {
-				if d := time.Until(refreshAt); d < wait {
-					if d < 0 {
-						d = 0
-					}
-					wait = d
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-trigger:
-			case <-time.After(wait):
-			}
-			continue
-		}
-		ok := eg.Collect(ctx, need)
-		select {
-		case <-trigger: // drop a stale trigger queued during collection
-		default:
-		}
-		wait := time.Duration(cfg.CollectRetryIntervalSec) * time.Second
-		if ok {
-			wait = time.Duration(cfg.CollectSuccessIntervalSec) * time.Second
-			log.Printf("turn-state for %s collected; next collection in %s", need, wait)
-			// A fresh 292 (+cookies) only stays valid ~240s: pause briefly,
-			// then collect again so the bundle is continuously refreshed.
-			if slices.Contains(cfg.StateLengths, eg.LastSeenLength()) {
-				refreshAt = time.Now().Add(time.Duration(cfg.CredRefreshPauseSec) * time.Second)
-				log.Printf("292 bundle harvested; refreshing again in %s", time.Until(refreshAt).Round(time.Second))
-			} else {
-				refreshAt = time.Time{}
-			}
-		} else {
-			refreshAt = time.Time{}
-			log.Printf("no turn-state for %s this round; retrying in %s", need, wait)
-		}
-		// A pending refresh always wins over the long success interval.
-		if !refreshAt.IsZero() {
-			if d := time.Until(refreshAt); d < wait {
-				if d < 0 {
-					d = 0
-				}
-				wait = d
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-trigger:
-			log.Printf("collection triggered on demand")
-		case <-time.After(wait):
-		}
-	}
+	log.Printf("attribution round started; watch it with `ccodex-rotate status`")
 }
 
 func runRestore(cfgPath, codexHome string) {

@@ -34,14 +34,20 @@ func TestGenerateConfigIncludesHealthAndGroups(t *testing.T) {
 		"type: url-test",
 		"name: 'AUTO'",
 		"name: 'CODEX'",
-		"name: 'COLLECT'",
-		"listeners:",
-		"proxy: 'COLLECT'",
 		"- MATCH,CODEX",
 		"allow-lan: false",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated config missing %q\n---\n%s", want, out)
+		}
+	}
+	for _, gone := range []string{
+		"COLLECT",
+		"collect-in",
+		"listeners:",
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("generated config must not contain %q (collection removed)", gone)
 		}
 	}
 }
@@ -101,37 +107,5 @@ func TestGroupDefaultSelection(t *testing.T) {
 	tail := out[idx:]
 	if !strings.Contains(tail, "proxies:\n      - 'AUTO'") {
 		t.Errorf("AUTO should be the first CODEX member:\n%s", tail)
-	}
-}
-
-func TestParallelLaneGroupsAndListeners(t *testing.T) {
-	c := baseCfg()
-	c.CollectLanes = 3
-	providers := []Provider{{Name: "sub1", Path: "/x/sub1.yaml"}}
-	out, err := GenerateConfig(c, providers)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	for _, want := range []string{
-		"- name: 'COLLECT-1'",
-		"- name: 'COLLECT-3'",
-		"- name: collect-in-1",
-		"- name: collect-in-3",
-		"port: 17893",
-		"port: 17895",
-		"proxy: 'COLLECT-1'",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in generated config", want)
-		}
-	}
-	if strings.Contains(out, "COLLECT-4") {
-		t.Errorf("only 3 lanes expected")
-	}
-	// Lane groups must live in proxy-groups, not under listeners.
-	lg := strings.Index(out, "- name: 'COLLECT-1'")
-	li := strings.Index(out, "listeners:")
-	if lg < 0 || li < 0 || lg > li {
-		t.Errorf("lane group must precede listeners section")
 	}
 }

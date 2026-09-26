@@ -12,28 +12,25 @@ import (
 	"time"
 
 	"ccodex-rotate/internal/mihomo"
+	"ccodex-rotate/internal/mtrace"
 	"ccodex-rotate/internal/proxy"
 )
 
 // Panel ties together the manager, egress and proxy for the UI.
 type Panel struct {
-	Listen           string
-	Upstream         string
-	Version          string
-	Password         string
-	ProbeModel       string
-	TargetLengths    []int
-	SuccessIntervalS int
-	RetryIntervalS   int
-	HuntNodes        int
-	CollectLanes     int
-	Trigger          func()
-	SourcesAdd       func(kind string, lines []string) (int, error)
-	SourcesClear     func(kind string) error
-	SourcesCounts    func() (subs, nodes, proxies int)
-	Mgr              *mihomo.Manager
-	Eg               *mihomo.Egress
-	Proxy            *proxy.Server
+	Listen        string
+	Upstream      string
+	Version       string
+	Password      string
+	ProbeModel    string
+	Trace         *mtrace.Monitor
+	TraceModel    string
+	SourcesAdd    func(kind string, lines []string) (int, error)
+	SourcesClear  func(kind string) error
+	SourcesCounts func() (subs, nodes, proxies int)
+	Mgr           *mihomo.Manager
+	Eg            *mihomo.Egress
+	Proxy         *proxy.Server
 
 	mu   sync.Mutex
 	subs map[chan string]struct{}
@@ -48,13 +45,10 @@ func (p *Panel) Handler() http.Handler {
 	mux.HandleFunc("/api/status", p.status)
 	mux.HandleFunc("/api/nodes", p.nodes)
 	mux.HandleFunc("/api/rotate", p.rotate)
-	mux.HandleFunc("/api/collect", p.collect)
-	mux.HandleFunc("/api/collect/stop", p.collectStop)
-	mux.HandleFunc("/api/collect-parallel", p.collectParallel)
-	mux.HandleFunc("/api/hunt", p.hunt)
+	mux.HandleFunc("/api/trace", p.traceToggle)
+	mux.HandleFunc("/api/trace-interval", p.traceInterval)
+	mux.HandleFunc("/api/trace-now", p.traceNow)
 	mux.HandleFunc("/api/events", p.events)
-	mux.HandleFunc("/api/scan", p.collect)
-	mux.HandleFunc("/api/injection", p.injection)
 	mux.HandleFunc("/api/force-model", p.forceModel)
 	mux.HandleFunc("/api/sources/add", p.sourcesAdd)
 	mux.HandleFunc("/api/sources/clear", p.sourcesClear)
@@ -78,50 +72,28 @@ func (p *Panel) status(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	node, _ := p.Mgr.Current(ctx)
 	ok, reachable, unknown, failed, total := p.Eg.Counts()
-	lastCollect, lastCollectOK, nextCollect, collecting := p.Eg.CollectInfo()
-	ctried, ctotal := p.Eg.CollectProgress()
-	seenModel, seenLen := p.Eg.LastSeen()
-	lastHunt, lastHuntFound := p.Eg.HuntInfo()
-	ccCount, ccAge := p.Proxy.CookieInfo()
 	reqs, errs, recent := p.Proxy.Stats()
 	m := map[string]any{
-		"listen":           p.Listen,
-		"upstream":         p.Upstream,
-		"node":             node,
-		"manual":           p.Eg.Manual(),
-		"alive":            ok + reachable + unknown,
-		"ok":               ok,
-		"reachable":        reachable,
-		"unknown":          unknown,
-		"failed":           failed,
-		"total":            total,
-		"collecting":       collecting,
-		"looping":          p.Eg.Looping(),
-		"collect_tried":    ctried,
-		"collect_total":    ctotal,
-		"last_seen_model":  seenModel,
-		"last_seen_len":    seenLen,
-		"last_hunt":        lastHunt,
-		"last_hunt_found":  lastHuntFound,
-		"inject":           p.Proxy.InjectionEnabled(),
-		"force_model":      p.Proxy.ForceModel(),
-		"auth_ready":       p.Proxy.HasAuth(),
-		"last_collect":     lastCollect,
-		"last_collect_ok":  lastCollectOK,
-		"next_collect":     nextCollect,
-		"probe_model":      p.ProbeModel,
-		"target_lengths":   p.TargetLengths,
-		"success_interval": p.SuccessIntervalS,
-		"retry_interval":   p.RetryIntervalS,
-		"requests":         reqs,
-		"errors":           errs,
-		"recent":           recent,
-		"collect_log":      p.Eg.CollectLog(),
-		"states":           p.Proxy.StateSnapshot(),
-		"state_ttl":        p.Proxy.StateTTLSeconds(),
-		"cred_ttl":         int(p.Proxy.CredTTL().Seconds()),
-		"cookie_count":     ccCount,
-		"cookie_age_sec":   ccAge, "mihomo_error": errString(p.Mgr.Err()),
+		"listen":         p.Listen,
+		"upstream":       p.Upstream,
+		"node":           node,
+		"manual":         p.Eg.Manual(),
+		"alive":          ok + reachable + unknown,
+		"ok":             ok,
+		"reachable":      reachable,
+		"unknown":        unknown,
+		"failed":         failed,
+		"total":          total,
+		"force_model":    p.Proxy.ForceModel(),
+		"probe_model":    p.ProbeModel,
+		"requests":       reqs,
+		"errors":         errs,
+		"recent":         recent,
+		"trace_enabled":  p.traceEnabled(),
+		"trace_running":  p.traceRunning(),
+		"trace_interval": p.traceIntervalSec(),
+		"trace_last":     p.traceLast(),
+		"trace_log":      p.traceLog(), "mihomo_error": errString(p.Mgr.Err()),
 	}
 	if p.SourcesCounts != nil {
 		s, n, px := p.SourcesCounts()
@@ -166,58 +138,6 @@ func (p *Panel) rotate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"node": node, "changed": changed})
 }
 
-func (p *Panel) collect(w http.ResponseWriter, r *http.Request) {
-	// The default fetch is parallel: one round over up to CollectLanes
-	// exits, each with a fresh session per probe.
-	n := p.CollectLanes
-	if n <= 0 {
-		n = 10
-	}
-	if p.Eg.Collecting() {
-		writeJSON(w, map[string]any{"started": false, "busy": true, "lanes": n})
-		return
-	}
-	go p.Eg.CollectParallel(context.Background(), p.ProbeModel, n)
-	writeJSON(w, map[string]any{"started": true, "lanes": n})
-}
-
-func (p *Panel) collectStop(w http.ResponseWriter, r *http.Request) {
-	stopped := p.Eg.StopCollect()
-	writeJSON(w, map[string]any{"stopped": stopped})
-}
-
-func (p *Panel) collectParallel(w http.ResponseWriter, r *http.Request) {
-	// Loop mode: parallel rounds back-to-back with no wait between them;
-	// a harvested bundle is immediately followed by the next round, until
-	// stopped. Each probe uses a fresh session.
-	n := p.CollectLanes
-	if n <= 0 {
-		n = 10
-	}
-	if p.Eg.Collecting() {
-		writeJSON(w, map[string]any{"started": false, "busy": true, "lanes": n})
-		return
-	}
-	go p.Eg.CollectParallelLoop(context.Background(), p.ProbeModel, n)
-	writeJSON(w, map[string]any{"started": true, "lanes": n})
-}
-
-func (p *Panel) hunt(w http.ResponseWriter, r *http.Request) {
-	// One manual hunt round: probe a few exits for an "astra window".
-	n := p.HuntNodes
-	if n <= 0 {
-		n = 4
-	}
-	if p.Eg.Collecting() {
-		writeJSON(w, map[string]any{"started": false, "busy": true})
-		return
-	}
-	go p.Eg.Hunt(context.Background(), p.ProbeModel, n)
-	writeJSON(w, map[string]any{"started": true})
-}
-
-// Broadcast pushes a message to all /api/events subscribers without
-// blocking (slow readers drop messages).
 func (p *Panel) Broadcast(msg string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -294,7 +214,7 @@ func (p *Panel) forceModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"force_model": p.Proxy.ForceModel()})
 }
 
-func (p *Panel) injection(w http.ResponseWriter, r *http.Request) {
+func (p *Panel) traceToggle(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled bool `json:"enabled"`
 	}
@@ -302,8 +222,101 @@ func (p *Panel) injection(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	p.Proxy.SetInjection(body.Enabled)
-	writeJSON(w, map[string]any{"injection": body.Enabled})
+	if p.Trace == nil {
+		http.Error(w, "trace not wired", http.StatusServiceUnavailable)
+		return
+	}
+	p.Trace.SetEnabled(body.Enabled)
+	writeJSON(w, map[string]any{"trace_enabled": body.Enabled})
+}
+
+// traceInterval sets the round interval in seconds (>=60).
+func (p *Panel) traceInterval(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Seconds int64 `json:"seconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if p.Trace == nil {
+		http.Error(w, "trace not wired", http.StatusServiceUnavailable)
+		return
+	}
+	p.Trace.SetInterval(time.Duration(body.Seconds) * time.Second)
+	writeJSON(w, map[string]any{"trace_interval": p.Trace.IntervalSec()})
+}
+
+// traceNow runs one attribution round immediately in the background.
+func (p *Panel) traceNow(w http.ResponseWriter, r *http.Request) {
+	if p.Trace == nil {
+		http.Error(w, "trace not wired", http.StatusServiceUnavailable)
+		return
+	}
+	go p.Trace.Check(context.Background(), p.traceExpected())
+	writeJSON(w, map[string]any{"started": true})
+}
+
+func (p *Panel) traceExpected() string {
+	model := p.TraceModel
+	if model == "" {
+		model = p.ProbeModel
+	}
+	if p.Proxy != nil {
+		if m := p.Proxy.CanonicalModel(model); m != "" {
+			return m
+		}
+	}
+	return model
+}
+
+// traceEnabled reports the watchdog switch state.
+func (p *Panel) traceEnabled() bool {
+	return p.Trace != nil && p.Trace.Enabled()
+}
+
+// traceRunning reports whether a round is in flight.
+func (p *Panel) traceRunning() bool {
+	return p.Trace != nil && p.Trace.Running()
+}
+
+func (p *Panel) traceIntervalSec() int64 {
+	if p.Trace == nil {
+		return 0
+	}
+	return p.Trace.IntervalSec()
+}
+
+func verdictJSON(v mtrace.Verdict) map[string]any {
+	return map[string]any{
+		"time": v.Time, "expected": v.Expected, "prediction": v.Prediction,
+		"family": v.Family, "prob": v.Prob, "match": v.Match,
+		"used": v.Used, "err": v.Err,
+	}
+}
+
+// traceLast returns the most recent verdict for the panel.
+func (p *Panel) traceLast() map[string]any {
+	if p.Trace == nil {
+		return nil
+	}
+	v, ok := p.Trace.Last()
+	if !ok {
+		return nil
+	}
+	return verdictJSON(v)
+}
+
+// traceLog returns recent verdicts, newest first.
+func (p *Panel) traceLog() []map[string]any {
+	if p.Trace == nil {
+		return nil
+	}
+	var out []map[string]any
+	for _, v := range p.Trace.Snapshot() {
+		out = append(out, verdictJSON(v))
+	}
+	return out
 }
 
 func (p *Panel) sourcesAdd(w http.ResponseWriter, r *http.Request) {

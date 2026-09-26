@@ -90,21 +90,9 @@ async function mutate(button, path, body = {}, message = "操作已完成") {
   }
 }
 function renderControls(s) {
-  $("injBtn").textContent = s.inject ? "凭据注入：已开启" : "凭据注入：已关闭";
-  $("injBtn").setAttribute("aria-pressed", String(!!s.inject));
-  $("injBtn").classList.toggle("selected", !!s.inject);
-  $("injBtn").disabled = false;
   $("mode").textContent = s.manual ? "手动固定" : "自动选择";
   $("rotateBtn").disabled = !!s.manual;
   $("rotateBtn").title = s.manual ? "请先恢复自动，再切换节点" : "切换转发出口";
-  $("collectBtn").disabled = !!s.collecting;
-  $("stopBtn").hidden = !s.collecting;
-  $("collectParBtn").textContent = s.looping
-    ? "并行循环：已开启"
-    : "并行循环：已关闭";
-  $("collectParBtn").setAttribute("aria-pressed", String(!!s.looping));
-  $("collectParBtn").classList.toggle("selected", !!s.looping);
-  $("collectParBtn").disabled = false;
 }
 function tick() {
   document.querySelectorAll("[data-exp]").forEach((el) => {
@@ -119,31 +107,29 @@ function tick() {
         " 秒"
       : "已过期";
   });
-  const next = $("next");
-  if (next.dataset.next) {
-    const seconds = Math.max(
-      0,
-      Math.ceil((Number(next.dataset.next) - Date.now()) / 1000),
-    );
-    next.textContent = seconds
-      ? Math.floor(seconds / 60) +
-        " 分 " +
-        String(seconds % 60).padStart(2, "0") +
-        " 秒后"
-      : "等待检查";
-  }
 }
 function renderStatus(s) {
   $("total").textContent = s.total || 0;
   $("requests").textContent = s.requests || 0;
   $("errors").textContent = (s.errors || 0) + " 次错误";
   $("quality").textContent =
-    (s.ok || 0) + " 个已标记可用 · " + (s.failed || 0) + " 个失败";
-  $("credentialCount").textContent = (s.states || []).filter((x) => !x.expired).length;
-  $("credentialCount").title =
-    Number(s.cookie_count) > 0
-      ? "Cookies: " + s.cookie_count + " 个，" + s.cookie_age_sec + " 秒前刷新"
-      : "Cookies 罐是空的（尚无上游响应）";
+    (s.ok || 0) + " 个可用 · " + (s.failed || 0) + " 个失败";
+  const last = s.trace_last;
+  if (!last) {
+    $("traceMetric").textContent = s.trace_enabled ? "等待首轮" : "未开启";
+    $("traceMetricSub").textContent = "行为指纹检测";
+  } else if (last.err) {
+    $("traceMetric").textContent = "检测异常";
+    $("traceMetricSub").textContent = "查看检测记录";
+  } else if (last.match) {
+    $("traceMetric").textContent = last.prediction;
+    $("traceMetricSub").textContent =
+      "行为一致 · " + Math.round((last.prob || 0) * 100) + "%";
+  } else {
+    $("traceMetric").textContent = "疑似降智";
+    $("traceMetricSub").textContent =
+      "预期 " + last.expected + "，实测 " + last.prediction;
+  }
   $("node").textContent = s.node || "等待可用节点";
   $("srcCounts").textContent =
     (s.subs || 0) +
@@ -153,91 +139,8 @@ function renderStatus(s) {
     (s.proxies || 0) +
     " 代理";
   $("setupHint").hidden = !!(s.subs || s.nodes || s.proxies || s.total);
-  $("collectBadge").textContent = s.collecting
-    ? "正在采集"
-    : s.auth_ready
-      ? "自动待命"
-      : "等待首条消息";
-  $("collectBadge").classList.toggle("good", !!s.collecting);
-  $("scan").textContent = s.collecting
-    ? "正在逐个探测节点，找到合格凭据即停止。"
-    : validTime(s.last_collect)
-      ? (s.last_collect_ok ? "上次采集成功 · " : "上次未采到 · ") +
-        time(s.last_collect)
-      : "在 Codex 中发送消息后，自动开始采集。";
-  $("progWrap").hidden = !s.collecting;
-  const percent = s.collect_total
-    ? Math.min(
-        100,
-        Math.round(((s.collect_tried || 0) * 100) / s.collect_total),
-      )
-    : 0;
-  $("prog").style.width = percent + "%";
-  $("prog").parentElement.setAttribute("aria-valuenow", percent);
-  $("progText").textContent =
-    "已探测 " +
-    (s.collect_tried || 0) +
-    " / " +
-    (s.collect_total || 0) +
-    " 个节点";
-  delete $("next").dataset.next;
-  $("next").textContent = s.collecting ? "采集中" : "等待触发";
-  if (!s.collecting && validTime(s.next_collect))
-    $("next").dataset.next = Date.parse(s.next_collect);
   if (!mutating) renderControls(s);
-  $("cfg").textContent =
-    "目标长度 " +
-    (s.target_lengths || []).join(" / ") +
-    " 字符 · 探测模型 " +
-    s.probe_model +
-    " · 成功检查间隔 " +
-    Math.round(s.success_interval / 60) +
-    " 分钟 · 失败重试间隔 " +
-    Math.round(s.retry_interval / 60) +
-    " 分钟";
-  const states = s.states || [];
-  $("states").innerHTML = states.length
-    ? table(
-        ["模型", "长度", "来源节点", "剩余有效期", "已注入", "Cookies"],
-        states
-          .map(
-            (x) =>
-              "<tr><td>" +
-              esc(x.model) +
-              "</td><td>" +
-              esc(x.length) +
-              " 字符</td><td>" +
-              esc(x.node || "—") +
-              '</td><td data-exp="' +
-              (Date.parse(x.created) + (Number(s.state_ttl) || 3600) * 1000) +
-              '" title="采集于 ' +
-              esc(time(x.created)) +
-              '">—</td><td>' +
-              esc(x.hits) +
-              " 次</td><td" +
-              (Number(x.cookie_count) > 0
-                ? ' data-exp="' +
-                  (Date.parse(x.created) +
-                    (Number(s.cred_ttl) || 240) * 1000) +
-                  '" title="240秒凭据窗"'
-                : "") +
-              ">" +
-              (Number(x.cookie_count) > 0
-                ? esc(x.cookie_count) + " 个"
-                : "—") +
-              "</td></tr>",
-          )
-          .join(""),
-      )
-    : empty(
-        s.collecting ? "正在寻找合格凭据" : "还没有可用凭据",
-        !s.auth_ready
-          ? "重启 Codex，新建会话发送一条消息，即可触发自动采集。"
-          : "正常转发不受影响。可点击「立即采集」重试。" +
-              (s.last_seen_len
-                ? "最近观测长度：" + s.last_seen_len + " 字符。"
-                : ""),
-      );
+  renderTrace(s);
   const recent = s.recent || [];
   $("recent").innerHTML = recent.length
     ? table(
@@ -247,7 +150,6 @@ function renderStatus(s) {
           "实际模型",
           "状态",
           "转发节点",
-          "注入",
           "尝试",
           "耗时",
           "方法 / 路径",
@@ -274,8 +176,6 @@ function renderStatus(s) {
               "</span></td><td>" +
               esc(x.node) +
               "</td><td>" +
-              (x.injected ? "已注入" : "未注入") +
-              "</td><td>" +
               esc(x.attempts) +
               "</td><td>" +
               esc(x.millis) +
@@ -288,25 +188,86 @@ function renderStatus(s) {
           .join(""),
       )
     : empty("暂无会话记录", "在 Codex 中发送消息后，这里会显示转发结果。");
-  const logs = s.collect_log || [];
-  $("collectLog").innerHTML = logs.length
+  tick();
+}
+function renderTrace(s) {
+  const on = !!s.trace_enabled;
+  $("traceBtn").textContent = on ? "检测：已开启" : "检测：已关闭";
+  $("traceBtn").setAttribute("aria-pressed", String(on));
+  $("traceBtn").classList.toggle("selected", on);
+  $("traceBtn").disabled = false;
+  const badge = $("traceBadge");
+  const last = s.trace_last;
+  if (s.trace_running) {
+    badge.textContent = "检测中…";
+    badge.className = "badge";
+    $("traceLast").textContent = "三道题作答中，请稍候几分钟";
+  } else if (!last) {
+    badge.textContent = on ? "等待首轮" : "已关闭";
+    badge.className = "badge";
+    $("traceLast").textContent = "尚无检测";
+  } else if (last.err) {
+    badge.textContent = "检测异常";
+    badge.className = "badge bad";
+    $("traceLast").textContent = "异常：" + last.err;
+  } else if (last.match) {
+    badge.textContent = "正常";
+    badge.className = "badge good";
+    $("traceLast").textContent =
+      time(last.time) +
+      " 实测 " +
+      last.prediction +
+      "（" +
+      Math.round((last.prob || 0) * 100) +
+      "%，" +
+      (last.used || 0) +
+      "/3 题有效），与预期一致";
+  } else {
+    badge.textContent = "疑似降智";
+    badge.className = "badge bad";
+    $("traceLast").textContent =
+      time(last.time) +
+      " 预期 " +
+      last.expected +
+      "，实测 " +
+      last.prediction +
+      "（" +
+      Math.round((last.prob || 0) * 100) +
+      "%，" +
+      (last.used || 0) +
+      "/3 题有效）";
+  }
+  if (document.activeElement !== $("traceInterval")) {
+    $("traceInterval").value = s.trace_interval || 1800;
+  }
+  const log = s.trace_log || [];
+  $("traceLog").innerHTML = log.length
     ? table(
-        ["时间", "模型", "事件"],
-        logs
+        ["时间", "预期 → 实测", "概率", "有效", "结论"],
+        log
           .map(
             (x) =>
               "<tr><td>" +
-              esc(new Date(x.time).toLocaleTimeString()) +
+              esc(time(x.time)) +
               "</td><td>" +
-              esc(x.model) +
+              esc(x.expected || "—") +
+              " → " +
+              esc(x.prediction || (x.err ? "异常" : "—")) +
               "</td><td>" +
-              esc(x.msg) +
+              (x.prob ? Math.round(x.prob * 100) + "%" : "—") +
+              "</td><td>" +
+              (x.used ? x.used + "/3" : "—") +
+              "</td><td>" +
+              (x.err
+                ? esc(x.err)
+                : x.match
+                  ? '<span class="badge good">一致</span>'
+                  : '<span class="badge bad">降智</span>') +
               "</td></tr>",
           )
           .join(""),
       )
-    : empty("暂无采集记录", "采集开始后，这里会显示进度和结果。");
-  tick();
+    : empty("暂无检测记录", "打开开关或点「立即检测」跑一轮。");
 }
 function renderNodes() {
   const query = $("nodeSearch").value.trim().toLowerCase();
@@ -408,16 +369,6 @@ document.querySelectorAll("[data-action]").forEach((button) =>
   button.addEventListener("click", () => {
     const path = button.dataset.action;
     const messages = {
-      "/api/collect": (r) =>
-        r.started
-          ? "已开始 " + (r.lanes || "") + " 路并行采集，请稍候查看进度。"
-          : "正忙（采集/猎手进行中），稍后再点。",
-      "/api/collect-parallel": (r) =>
-        "已开始 " +
-        (r.lanes || "") +
-        " 路循环并行采集（采到即开下一轮），点「停止采集」结束。",
-      "/api/collect/stop": (r) =>
-        r.stopped ? "本轮采集已停止。" : "当前没有正在进行的采集。",
       "/api/rotate": (r) =>
         r.changed ? "已切换转发节点。" : "暂无其他可切换节点。",
       "/api/reset": "已恢复自动选择。",
@@ -425,30 +376,21 @@ document.querySelectorAll("[data-action]").forEach((button) =>
     mutate(button, path, {}, messages[path]);
   }),
 );
-$("injBtn").addEventListener("click", () => {
-  if (status)
-    mutate(
-      $("injBtn"),
-      "/api/injection",
-      { enabled: !status.inject },
-      "已更新凭据注入设置。",
-    );
-});
-$("collectParBtn").addEventListener("click", () => {
+$("traceBtn").addEventListener("click", () => {
   if (!status) return;
-  if (status.looping) {
-    mutate($("collectParBtn"), "/api/collect/stop", {}, "并行循环已关闭。");
-  } else {
-    mutate(
-      $("collectParBtn"),
-      "/api/collect-parallel",
-      {},
-      (r) =>
-        r && r.started
-          ? "并行循环已开启：采到即开下一轮。"
-          : "正忙（采集/猎手进行中），稍后再点。",
-    );
-  }
+  mutate(
+    $("traceBtn"),
+    "/api/trace",
+    { enabled: !status.trace_enabled },
+    "已更新指纹检测开关。",
+  );
+});
+$("traceSaveBtn").addEventListener("click", () => {
+  const v = Math.max(60, parseInt($("traceInterval").value, 10) || 1800);
+  mutate($("traceSaveBtn"), "/api/trace-interval", { seconds: v }, "检测频率已保存。");
+});
+$("traceNowBtn").addEventListener("click", () => {
+  mutate($("traceNowBtn"), "/api/trace-now", {}, "已开始一轮检测，请稍候查看结果。");
 });
 $("list").addEventListener("click", (event) => {
   const button = event.target.closest("[data-pin]");
@@ -457,7 +399,7 @@ $("list").addEventListener("click", (event) => {
       button,
       "/api/pin",
       { name: button.dataset.pin },
-      "已固定转发出口，采集仍自动选路。",
+      "已固定转发出口。",
     );
 });
 $("nodeSearch").addEventListener("input", renderNodes);
@@ -526,13 +468,13 @@ const guideSteps = [
   ],
   [
     "回到 Codex，发一条消息",
-    "重启 Codex，新建会话并发送一条消息。工具会获取本次请求的认证信息，并自动开始采集凭据。",
-    "采集会消耗少量账号额度。暂时没采到凭据时，消息仍会正常转发。",
+    "重启 Codex，新建会话并发送一条消息。工具会获取本次请求的认证信息，用于行为检测。",
+    "消息始终正常转发，不受检测开关影响。",
   ],
   [
     "查看状态，开始使用",
-    "在概览查看转发出口，在「凭据管理」查看有效期与注入次数。日常使用保持自动选择即可。",
-    "连接不稳定时可「换一个节点」。手动固定只影响消息转发；采集通道始终独立选路。",
+    "在概览查看转发出口，在「降智检测」开关行为指纹检测。日常使用保持自动选择即可。",
+    "连接不稳定时可「换一个节点」。手动固定只影响消息转发。",
   ],
 ];
 let guideStep = 0,
@@ -710,7 +652,7 @@ renderNotifyBtn();
 connectEvents();
 // Single-page navigation: only one section is visible at a time so nodes
 // and logs each get their own page. Hash-based: #nodes deep-links.
-const PAGES = ["overview", "credentials", "sources", "nodes", "activity"];
+const PAGES = ["overview", "trace", "sources", "nodes", "activity"];
 function showPage(name) {
   if (!PAGES.includes(name)) name = "overview";
   for (const p of PAGES) {

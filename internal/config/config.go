@@ -78,6 +78,15 @@ type Config struct {
 	// LoopPauseSec is the pause between parallel-loop rounds, to stay under
 	// upstream rate limits (tight loops earn HTTP 429s). Default 10.
 	LoopPauseSec int `json:"loop_pause_seconds"`
+	// TraceEnabled runs periodic behavioral degradation checks (ModelTrace
+	// number-fingerprint attribution). Default false: each round costs
+	// three full generations.
+	TraceEnabled bool `json:"trace_enabled"`
+	// TraceIntervalSec is the interval between attribution rounds.
+	// Default 1800 (clamped to >=60s at runtime).
+	TraceIntervalSec int `json:"trace_interval_seconds"`
+	// TraceModel is the model under test. Default "" means ProbeModel.
+	TraceModel string `json:"trace_model"`
 	// CollectOnStart collects once as soon as account auth is available.
 	CollectOnStart bool `json:"collect_on_start"`
 	// AutoCollect starts collection automatically when a target-model request
@@ -180,6 +189,8 @@ func Default() Config {
 		MaxProbesPerCollect:       25,
 		CollectLanes:              10,
 		LoopPauseSec:              10,
+		TraceEnabled:              false,
+		TraceIntervalSec:          1800,
 		CollectOnStart:            true,
 		CollectSuccessIntervalSec: 1800,
 		CollectRetryIntervalSec:   300,
@@ -333,6 +344,9 @@ func (c *Config) normalize(path string) error {
 	}
 	if c.LoopPauseSec <= 0 {
 		c.LoopPauseSec = 10
+	}
+	if c.TraceIntervalSec <= 0 {
+		c.TraceIntervalSec = 1800
 	}
 	if c.CollectSuccessIntervalSec <= 0 {
 		c.CollectSuccessIntervalSec = 1800

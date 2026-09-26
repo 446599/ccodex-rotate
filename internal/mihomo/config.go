@@ -10,18 +10,9 @@ import (
 
 // provider names are fixed so the manager can address them.
 const (
-	AutoGroup    = "AUTO"
-	MainGroup    = "CODEX"   // forwarding (may be manually pinned)
-	CollectGroup = "COLLECT" // credential collection (always auto)
+	AutoGroup = "AUTO"
+	MainGroup = "CODEX" // forwarding (may be manually pinned)
 )
-
-// LaneGroup returns the dedicated select group for parallel-collection lane
-// i (1-based). Each lane has its own group + inbound port so workers never
-// share one group selection (which would scramble exit attribution).
-func LaneGroup(i int) string { return fmt.Sprintf("COLLECT-%d", i) }
-
-// LanePort returns the inbound port for lane i (1-based).
-func LanePort(base, i int) int { return base + i }
 
 // Provider is a locally cached subscription file loaded by mihomo.
 type Provider struct {
@@ -116,59 +107,6 @@ func GenerateConfig(cfg config.Config, providers []Provider) (string, error) {
 		for _, p := range providerNames {
 			fmt.Fprintf(&b, "      - %s\n", yq(p))
 		}
-	}
-
-	// COLLECT group + a dedicated inbound: credential collection is routed
-	// through it, so a manual forwarding choice never affects collection.
-	fmt.Fprintf(&b, "  - name: %s\n", yq(CollectGroup))
-	b.WriteString("    type: select\n")
-	if len(explicit) > 0 {
-		b.WriteString("    proxies:\n")
-		for _, p := range explicit {
-			fmt.Fprintf(&b, "      - %s\n", yq(p))
-		}
-	}
-	if len(providerNames) > 0 {
-		b.WriteString("    use:\n")
-		for _, p := range providerNames {
-			fmt.Fprintf(&b, "      - %s\n", yq(p))
-		}
-	}
-
-	// Parallel-collection lanes: one select group each, with the same
-	// members. A worker pins only its own lane group, so N exits can be
-	// probed concurrently without sharing (and scrambling) one selection.
-	for i := 1; i <= cfg.CollectLanes; i++ {
-		fmt.Fprintf(&b, "  - name: %s\n", yq(LaneGroup(i)))
-		b.WriteString("    type: select\n")
-		if len(explicit) > 0 {
-			b.WriteString("    proxies:\n")
-			for _, p := range explicit {
-				fmt.Fprintf(&b, "      - %s\n", yq(p))
-			}
-		}
-		if len(providerNames) > 0 {
-			b.WriteString("    use:\n")
-			for _, p := range providerNames {
-				fmt.Fprintf(&b, "      - %s\n", yq(p))
-			}
-		}
-	}
-
-	b.WriteString("listeners:\n")
-	b.WriteString("  - name: collect-in\n")
-	b.WriteString("    type: mixed\n")
-	fmt.Fprintf(&b, "    port: %d\n", cfg.CollectPort)
-	b.WriteString("    listen: 127.0.0.1\n")
-	fmt.Fprintf(&b, "    proxy: %s\n", yq(CollectGroup))
-
-	// One dedicated inbound port per lane, routed to its lane group.
-	for i := 1; i <= cfg.CollectLanes; i++ {
-		fmt.Fprintf(&b, "  - name: collect-in-%d\n", i)
-		b.WriteString("    type: mixed\n")
-		fmt.Fprintf(&b, "    port: %d\n", LanePort(cfg.CollectPort, i))
-		b.WriteString("    listen: 127.0.0.1\n")
-		fmt.Fprintf(&b, "    proxy: %s\n", yq(LaneGroup(i)))
 	}
 
 	b.WriteString("rules:\n")
