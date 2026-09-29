@@ -7,6 +7,7 @@ Bridges Codex tool calls through the run_officejs transport convention
 """
 import copy
 import json
+import re
 import subprocess
 import threading
 import time
@@ -40,7 +41,10 @@ def load_config():
     cfg = {"default_model": "gpt-5.6-sol", "default_effort": "",
            "upstream_proxy": "http://127.0.0.1:17890",
            "fallback_url": "http://127.0.0.1:17850/backend-api/codex/responses",
-           "bps_models": ["gpt-6-astra", "gpt-5.6-sol"]}
+           "bps_models": ["gpt-6-astra", "gpt-5.6-sol"],
+           "model_aliases": {"gpt-6-luna": "gpt-6-astra",
+                             "sol-6": "gpt-5.6-sol",
+                             "luna": "gpt-6-astra"}}
     try:
         cfg.update(json.load(open(CONFIG_FILE)))
     except Exception:
@@ -313,12 +317,45 @@ TURN = {"task": str(uuid.uuid4()), "turn": None, "iter": 0}
 TURN_LOCK = threading.Lock()
 
 
+def fix_exec_js(src):
+    """The client's exec isolate has no `console` (output goes through
+    text(...)/notify(...)). bps models habitually emit console.log, which
+    surfaces as `ReferenceError: console is not defined`. Rewrite console.*
+    to text() and guard the empty-input regression."""
+    if not isinstance(src, str) or src.strip() == "":
+        return "void 0;"
+    fixed = re.sub(r'\bconsole\s*\.\s*(?:log|info|warn|error|debug|trace|dir)\s*\(',
+                   "text(", src)
+    return fixed if fixed.strip() else "void 0;"
+
+
+def _lenient_loads(s):
+    """json.loads that tolerates the model's sloppy escapes in JS args.
+
+    bps models often JSON-encode JS that uses single-quoted strings and add
+    a redundant backslash (`\\'`), which is not a legal JSON escape and makes
+    strict json.loads fail -> the whole tool call gets dropped. Drop the
+    backslash on any escape JSON does not define and retry."""
+    if not isinstance(s, str):
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    fixed = re.sub(r'\\([^"\\/bfnrtu])', r'\1', s)
+    try:
+        return json.loads(fixed)
+    except Exception:
+        return None
+
+
 def convert_call(native, specs):
     """run_officejs item -> real function_call/custom_tool_call."""
-    try:
-        args = json.loads(native.get("arguments") or "{}")
-        inner = json.loads(args.get("code") or "{}")
-    except Exception:
+    args = _lenient_loads(native.get("arguments") or "{}")
+    if not isinstance(args, dict):
+        return None
+    inner = _lenient_loads(args.get("code") or "{}")
+    if not isinstance(inner, dict):
         return None
     name = str_val(inner.get("tool")) or str_val(inner.get("name"))
     if not name or name in ("run_officejs", "functions.run_officejs"):
@@ -474,6 +511,8 @@ def sse_emit(items, start_idx=0, start_seq=0):
             emit("response.output_item.done", {"output_index": i, "item": it})
             continue
         if ty == "custom_tool_call":
+            if str_val(it.get("name")) == "exec":
+                it["input"] = fix_exec_js(it.get("input"))
             data = it.get("input", "")
             shell = dict(it)
             shell["input"] = ""
@@ -1003,7 +1042,23 @@ class H(BaseHTTPRequestHandler):
         req_model = str(doc.get("model") or cfg.get("default_model") or "gpt-5.6-sol")
         bps_models = [str(m).lower() for m in
                       (cfg.get("bps_models") or ["gpt-6-astra", "gpt-5.6-sol"])]
-        route = "bps" if req_model.lower() in bps_models else "fallback"
+        aliases = {str(k).lower(): str(v)
+                   for k, v in (cfg.get("model_aliases") or {}).items()}
+        lowered = req_model.lower()
+        if lowered not in bps_models and lowered in aliases:
+            trace("ALIAS %s -> %s" % (req_model, aliases[lowered]))
+            req_model = aliases[lowered]
+            lowered = req_model.lower()
+        if lowered not in bps_models and not codex_account_auth()[0]:
+            # no official account token: fallback would just 401-loop, so
+            # serve a BPS-backed model instead of hanging the client
+            alt = cfg.get("default_model")
+            if str(alt).lower() not in bps_models:
+                alt = bps_models[0]
+            trace("ALIAS-ONSHIM %s -> %s" % (req_model, alt))
+            req_model = alt
+            lowered = req_model.lower()
+        route = "bps" if lowered in bps_models else "fallback"
         pure = (route == "fallback")
         trace("ROUTE %s -> %s" % (req_model, route))
         if pure:
@@ -1262,7 +1317,9 @@ class H(BaseHTTPRequestHandler):
                     trace("BRIDGE %s -> %s" % (
                         item.get("call_id"), conv.get("name")))
                     return
-                trace("BRIDGE-DROP invalid envelope call=%s" % item.get("call_id"))
+                trace("BRIDGE-DROP invalid envelope call=%s args=%s" % (
+                    item.get("call_id"),
+                    str_val(item.get("arguments"))[:200]))
                 return
             if (isinstance(item, dict)
                     and item.get("type") in ("function_call", "custom_tool_call")):
